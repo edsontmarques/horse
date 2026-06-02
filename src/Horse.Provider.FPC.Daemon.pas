@@ -1,5 +1,7 @@
 unit Horse.Provider.FPC.Daemon;
 
+{ PATCH-FPCDAEMON-1: ListenWithConfig override — same root cause as PATCH-CONSOLE-1. }
+
 {$IF DEFINED(FPC)}
   {$MODE DELPHI}{$H+}
 {$ENDIF}
@@ -18,6 +20,7 @@ uses
   Horse.Response,
   Horse.Core,
   Horse.Provider.Abstract,
+  Horse.Provider.Config,
   Horse.Constants,
   Horse.Proc,
   Horse.Commons;
@@ -25,6 +28,7 @@ uses
 type
   THTTPServerThread = class(TThread)
   private
+    FStartServer: Boolean;
     FHost: string;
     FPort: Integer;
     FListenQueue: Word;
@@ -83,6 +87,8 @@ type
       const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
     class procedure Listen(const ACallbackListen: TProc;
       const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
+    class procedure ListenWithConfig(const APort: Integer;
+      const AConfig: THorseCrossSocketConfig); override;
     class destructor UnInitialize;
     class function IsRunning: Boolean;
   end;
@@ -299,6 +305,14 @@ class procedure THorseProvider.Listen(const APort: Integer; const ACallbackListe
   ACallbackStopListen: TProc);
 begin
   Listen(APort, FHost, ACallbackListen, ACallbackStopListen);
+end;
+
+// PATCH-FPCDAEMON-1
+class procedure THorseProvider.ListenWithConfig(const APort: Integer;
+  const AConfig: THorseCrossSocketConfig);
+begin
+  SetPort(APort);
+  InternalListen;
 end;
 
 class procedure THorseProvider.SetHost(const AValue: string);
