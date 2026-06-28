@@ -38,6 +38,8 @@ The **default Provider depends on the compiler**:
 | **`fphttpserver`** | _(none on FPC)_ | Default for FPC self-hosted | n/a | ✔ |
 | **horse-provider-crosssocket** | `HORSE_CROSSSOCKET` | Optional, external package | ✔ | ✔ |
 | **horse-provider-mormot** | `HORSE_PROVIDER_MORMOT` | Optional, external package | ✔ | ✔ |
+| **[HTTP.sys](./httpsys.md)** | `HORSE_PROVIDER_HTTPSYS` | Optional, built-in (Windows kernel mode) | ✔ | ✔ |
+| **[epoll](./epoll.md)** | `HORSE_PROVIDER_EPOLL` | Optional, built-in (Linux async event loop) | ✔ | ✔ |
 
 > **What library does the HTTP work, per Application type?** This is the deciding question — and it's *not* always Indy. The unifying abstraction across every row is `Web.HTTPApp.TWebRequest` on Delphi or `fpHTTP.TRequest` on FPC; below that, the concrete library differs.
 >
@@ -47,6 +49,8 @@ The **default Provider depends on the compiler**:
 > | Daemon / HTTPApplication / LCL | FPC | **`fphttpserver`** | ✘ |
 > | Any self-hosted + `HORSE_CROSSSOCKET` | Either | **`Delphi-Cross-Socket`** | ✘ |
 > | Any self-hosted + `HORSE_PROVIDER_MORMOT` | Either | **`mORMot2`** (`THttpServer` / `THttpApiServer`) | ✘ |
+> | Any self-hosted + `HORSE_PROVIDER_HTTPSYS` | Either | **`HTTP.sys`** (Windows Kernel Driver) | ✘ |
+> | Any self-hosted + `HORSE_PROVIDER_EPOLL` | Either | **`epoll`** (Linux kernel epoll API) | ✘ |
 > | Apache module | Either | **Apache httpd** (via `Web.HTTPApp.TApacheRequest` / `mod_horse`) | ✘ |
 > | ISAPI | Delphi | **IIS** (via `Web.HTTPApp.TISAPIRequest`) | ✘ |
 > | CGI | Delphi | **Web server's CGI runner** (via `Web.HTTPApp.TCGIRequest`) | ✘ |
@@ -133,6 +137,8 @@ boss install horse-provider-mormot
 
 In your project's Conditional Defines: `HORSE_PROVIDER_MORMOT`. Your code stays the same.
 
+**Three server backends.** The provider can host any of mORMot2's HTTP servers, selected via `THorseMormotConfig.ServerKind`: `mskThreadPool` (`THttpServer`, the default — one thread per concurrent request), `mskAsync` (`THttpAsyncServer`, a non-blocking IOCP/epoll/kqueue event loop that scales past thread-per-request), or `mskHttpApi` (`THttpApiServer`, Windows **http.sys** kernel-mode HTTP — Windows only). Switch at runtime (`Cfg.ServerKind := mskAsync` before `THorse.ListenWithConfig`) or set a project-wide define (`HORSE_MORMOT_ASYNC`, or `HORSE_MORMOT_HTTPAPI` on Windows) to flip the default. With none, the default stays `THttpServer` — unchanged behaviour. `mskHttpApi` registers `http://+:<port>/` with http.sys, which needs Administrator rights or a one-time `netsh http add urlacl`. See the [provider's own documentation](https://github.com/freitasjca/horse-provider-mormot#readme) for details.
+
 **What changes vs. Indy:**
 
 | | Indy | mORMot2 |
@@ -168,7 +174,7 @@ In your project's Conditional Defines: `HORSE_PROVIDER_MORMOT`. Your code stays 
 
 Both providers use IOCP/epoll and a context object pool, so throughput is comparable under typical workloads.
 
-For configuration (`ThreadPool`, `MaxBodyBytes`, `DrainTimeoutMs`, `ServerBanner`) and application-type wrappers (VCL, Windows Service, Linux daemon), see the [provider's own documentation](https://github.com/freitasjca/horse-provider-mormot#readme).
+For configuration (`ServerKind`, `ThreadPool`, `MaxBodyBytes`, `DrainTimeoutMs`, `ServerBanner`) and application-type wrappers (VCL, Windows Service, Linux daemon), see the [provider's own documentation](https://github.com/freitasjca/horse-provider-mormot#readme).
 
 > **mORMot2 installation** — mORMot2 is not available via `boss install`. Clone [synopse/mORMot2](https://github.com/synopse/mORMot2) and add `<mORMot2>/src`, `<mORMot2>/src/core`, `<mORMot2>/src/net` to the compiler search path.
 

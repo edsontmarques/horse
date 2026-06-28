@@ -34,10 +34,12 @@ O **Provider padrão depende do compilador**:
 
 | Provider | Define de compilação | Status | Delphi | Lazarus |
 |---|---|---|:---:|:---:|
-| **Indy** | _(nenhum no Delphi)_ | Padrão para self-hosted no Delphi | ✔ | n/a |
-| **`fphttpserver`** | _(nenhum no FPC)_ | Padrão para self-hosted no FPC | n/a | ✔ |
-| **horse-provider-crosssocket** | `HORSE_CROSSSOCKET` | Opcional, pacote externo | ✔ | ✔ |
-| **horse-provider-mormot** | `HORSE_PROVIDER_MORMOT` | Opcional, pacote externo | ✔ | ✔ |
+| **Indy** _(padrão Delphi para self-hosted)_ | _(nenhum)_ | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;n/a |
+| **`fphttpserver`** _(padrão FPC para self-hosted)_ | _(nenhum)_ | &nbsp;&nbsp;&nbsp;n/a | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+| 🆕 **[horse-provider-crosssocket](https://github.com/freitasjca/horse-provider-crosssocket)** | `HORSE_CROSSSOCKET` | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+| 🆕 **[horse-provider-mormot](https://github.com/freitasjca/horse-provider-mormot)** | `HORSE_PROVIDER_MORMOT` | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+| **[HTTP.sys](./httpsys.pt-BR.md)** | `HORSE_PROVIDER_HTTPSYS` | Opcional, embutido (modo kernel Windows) | ✔ | ✔ |
+| **[epoll](./epoll.pt-BR.md)** | `HORSE_PROVIDER_EPOLL` | Opcional, embutido (event loop assíncrono Linux) | ✔ | ✔ |
 
 > **Qual biblioteca faz o trabalho de HTTP, por Tipo de aplicação?** Esta é a pergunta-chave — e a resposta *nem sempre* é Indy. A abstração unificadora em todas as linhas é `Web.HTTPApp.TWebRequest` no Delphi ou `fpHTTP.TRequest` no FPC; abaixo disso, a biblioteca concreta difere.
 >
@@ -47,6 +49,8 @@ O **Provider padrão depende do compilador**:
 > | Daemon / HTTPApplication / LCL | FPC | **`fphttpserver`** | ✘ |
 > | Qualquer self-hosted + `HORSE_CROSSSOCKET` | Qualquer um | **`Delphi-Cross-Socket`** | ✘ |
 > | Qualquer self-hosted + `HORSE_PROVIDER_MORMOT` | Qualquer um | **`mORMot2`** (`THttpServer` / `THttpApiServer`) | ✘ |
+> | Qualquer self-hosted + `HORSE_PROVIDER_HTTPSYS` | Qualquer um | **`HTTP.sys`** (Driver de Kernel do Windows) | ✘ |
+> | Qualquer self-hosted + `HORSE_PROVIDER_EPOLL` | Qualquer um | **`epoll`** (API epoll nativa do Linux) | ✘ |
 > | Módulo Apache | Qualquer um | **Apache httpd** (via `Web.HTTPApp.TApacheRequest` / `mod_horse`) | ✘ |
 > | ISAPI | Delphi | **IIS** (via `Web.HTTPApp.TISAPIRequest`) | ✘ |
 > | CGI | Delphi | **CGI runner do webserver** (via `Web.HTTPApp.TCGIRequest`) | ✘ |
@@ -133,6 +137,8 @@ boss install horse-provider-mormot
 
 Nos Conditional Defines do projeto: `HORSE_PROVIDER_MORMOT`. Seu código fica o mesmo.
 
+**Três back-ends de servidor.** O provider pode hospedar qualquer um dos servidores HTTP do mORMot2, selecionado por `THorseMormotConfig.ServerKind`: `mskThreadPool` (`THttpServer`, o padrão — uma thread por requisição concorrente), `mskAsync` (`THttpAsyncServer`, um laço de eventos não bloqueante IOCP/epoll/kqueue que escala além de uma thread por requisição) ou `mskHttpApi` (`THttpApiServer`, HTTP em modo kernel via **http.sys** do Windows — somente Windows). Troque em tempo de execução (`Cfg.ServerKind := mskAsync` antes de `THorse.ListenWithConfig`) ou defina um define de projeto (`HORSE_MORMOT_ASYNC`, ou `HORSE_MORMOT_HTTPAPI` no Windows) para alterar o padrão. Sem nenhum deles, o padrão continua sendo `THttpServer` — comportamento inalterado. O `mskHttpApi` registra `http://+:<porta>/` no http.sys, o que exige direitos de Administrador ou um `netsh http add urlacl` executado uma única vez. Veja a [documentação do próprio provider](https://github.com/freitasjca/horse-provider-mormot#readme) para detalhes.
+
 **O que muda vs. Indy:**
 
 | | Indy | mORMot2 |
@@ -166,7 +172,7 @@ Nos Conditional Defines do projeto: `HORSE_PROVIDER_MORMOT`. Seu código fica o 
 
 Ambos os providers usam IOCP/epoll e um pool de objetos de contexto, portanto a taxa de transferência é comparável sob cargas típicas.
 
-Para configuração (`ThreadPool`, `MaxBodyBytes`, `DrainTimeoutMs`, `ServerBanner`) e as implementações para cada tipo de aplicação  (VCL, Serviço Windows, daemon Linux), veja a [documentação do próprio provider](https://github.com/freitasjca/horse-provider-mormot#readme).
+Para configuração (`ServerKind`, `ThreadPool`, `MaxBodyBytes`, `DrainTimeoutMs`, `ServerBanner`) e as implementações para cada tipo de aplicação  (VCL, Serviço Windows, daemon Linux), veja a [documentação do próprio provider](https://github.com/freitasjca/horse-provider-mormot#readme).
 
 > **Instalação do mORMot2** — o mORMot2 não está disponível via `boss install`. Clone [synopse/mORMot2](https://github.com/synopse/mORMot2) e adicione `<mORMot2>/src`, `<mORMot2>/src/core`, `<mORMot2>/src/net` ao search path do compilador.
 
