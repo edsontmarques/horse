@@ -76,6 +76,15 @@ These don't use a self-hosted Provider — the host process owns the socket. Cov
 - Works on every FPC version listed above. **Not available on Delphi** — Delphi builds use Indy instead.
 - Provider unit: `Horse.Provider.FPC.Daemon` / `Horse.Provider.FPC.HTTPApplication` / `Horse.Provider.FPC.LCL`. Each `uses fphttpserver, fpHTTP, httpdefs`.
 - SSL via OpenSSL through FPC's standard HTTP SSL handlers — no Indy dependency.
+- FPC trunk / 3.3.x note: recent `fcl-web` versions classify write requests
+  (`POST`, `PUT`, `DELETE`, `PATCH`, `BATCH`) and consult the `TFPWebModule`
+  session CSRF token before `DoOnRequest`. Horse does not use `fcl-web` session
+  or CSRF state for its routing pipeline; request security belongs to Horse
+  middleware and the application. For FPC versions where
+  `TCustomFPWebModule.IsWriteRequest` exists, `Horse.WebModule` overrides that
+  classifier so FPC providers backed by `THorseWebModule` do not create or require
+  an implicit `fcl-web` session. The override is version-guarded and is not compiled on FPC
+  3.2.x, where the hook and the trunk CSRF pre-check do not exist.
 
 ### CrossSocket — optional, cross-compiler
 
