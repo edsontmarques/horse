@@ -164,11 +164,15 @@ begin
   if (LMiddlewareCount > FIndex) then
   begin
     FFound^ := True;
-    {$IF DEFINED(FPC)}
+    {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
     THorseCallbackProc(Self.FMiddleware.Items[FIndex])(FRequest, FResponse, Next);
-    LMiddlewareCount := FMiddleware.Count;
+    {$ELSEIF DEFINED(FPC)}
+    Self.FMiddleware.Items[FIndex](FRequest, FResponse, Next);
     {$ELSE}
     Self.FMiddleware[FIndex](FRequest, FResponse, Next);
+    {$ENDIF}
+    {$IF DEFINED(FPC)}
+    LMiddlewareCount := FMiddleware.Count;
     {$ENDIF}
   end
   else if (FIndexSegment = Length(FSegments)) and Assigned(FCallBack) then
@@ -185,8 +189,10 @@ begin
       begin
         try
           FFound^ := True;
-          {$IF DEFINED(FPC)}
+          {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
           THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
+          {$ELSEIF DEFINED(FPC)}
+          LCallback.Items[FIndexCallback](FRequest, FResponse, Next);
           {$ELSE}
           LCallback[FIndexCallback](FRequest, FResponse, Next);
           {$ENDIF}

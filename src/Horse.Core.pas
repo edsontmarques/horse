@@ -225,7 +225,9 @@ uses
   {$ENDIF}
   ;
 
-{$I Horse.Core.Wrappers.inc}
+{$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+  {$I Horse.Core.Wrappers.inc}
+{$ENDIF}
 
 class function THorseCore.AddCallback(const ACallback: THorseCallback): THorseCore;
 begin
@@ -584,8 +586,13 @@ end;
 
 class function THorseCore.GetCallback(const ACallbackRequest: THorseCallbackRequestResponse): THorseCallback;
 begin
-{$IFDEF FPC}
-  {$IF DEFINED(FPC)}
+{$IF DEFINED(FPC) AND DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+  Result :=
+    procedure(Req: THorseRequest; Res: THorseResponse; Next: TNextProc)
+    begin
+      ACallbackRequest(Req, Res);
+    end;
+{$ELSEIF DEFINED(FPC)}
   if GCallbacks2Count < 64 then
   begin
     GCallbacks2[GCallbacks2Count] := ACallbackRequest;
@@ -594,7 +601,6 @@ begin
   end
   else
     Result := Pointer(@ACallbackRequest);
-  {$IFEND}
 {$ELSE}
   Result :=
     procedure(Req: THorseRequest; Res: THorseResponse; Next: TProc)
@@ -617,8 +623,14 @@ end;
 
 class function THorseCore.GetCallback(const ACallbackRequest: THorseCallbackRequest): THorseCallback;
 begin
-{$IFDEF FPC}
-  {$IF DEFINED(FPC)}
+{$IF DEFINED(FPC) AND DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+  Result :=
+    procedure(Req: THorseRequest; Res: THorseResponse; Next: TNextProc)
+    begin
+      Res.Status(THTTPStatus.NoContent);
+      ACallbackRequest(Req);
+    end;
+{$ELSEIF DEFINED(FPC)}
   if GCallbacks1Count < 64 then
   begin
     GCallbacks1[GCallbacks1Count] := ACallbackRequest;
@@ -627,7 +639,6 @@ begin
   end
   else
     Result := Pointer(@ACallbackRequest);
-  {$IFEND}
 {$ELSE}
   Result :=
     procedure(Req: THorseRequest; Res: THorseResponse; Next: TProc)
