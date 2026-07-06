@@ -85,7 +85,7 @@ begin
     LChar := Value[I];
     if LChar in ['A'..'Z'] then
       Inc(LChar, 32);
-    Result := ((Result shl 5) + Result) + Ord(LChar);
+    Result := LongWord((((QWord(Result) shl 5) + QWord(Result)) + Ord(LChar)) and High(LongWord));
   end;
 end;
 {$ENDIF}
