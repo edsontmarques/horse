@@ -40,6 +40,7 @@ type
     Part: string;
     IsParam: Boolean;
     ParamName: string;
+    FullPath: string;
     Children: TObjectList<TRadixNode>;
     Callbacks: TDictionary<TMethodType, TArray<THorseCallback>>;
     Middlewares: TList<THorseCallback>;
@@ -145,6 +146,8 @@ procedure TRadixFlow.Next;
 var
   LIndex: Integer;
 begin
+  if FResponse.Aborted then
+    Exit;
   if (FIndex < FCallbacks.Count) and FActive then
   begin
     LIndex := FIndex;
@@ -398,6 +401,7 @@ begin
   end;
 
   LCurrent.AddRouteCallback(AHTTPType, ACallback, AIsMiddleware);
+  LCurrent.FullPath := '/' + APath.Trim(['/']);
 end;
 
 procedure THorseRadixRouter.RegisterRoute(const AHTTPType: TMethodType; const APath: string; const ACallback: THorseCallback);
@@ -468,6 +472,8 @@ begin
   begin
     if LChild.IsParam then
     begin
+      if AParams = nil then
+        AParams := TDictionary<string, string>.Create;
       AParams.AddOrSetValue(LChild.ParamName, LCurrentSlice.ToString);
       LTempNode := LChild;
       LBestMatch := FindNode(ASegments, AIndex + 1, LTempNode, AHTTPType, AMiddlewares, AParams);
@@ -520,15 +526,19 @@ begin
       LStartSegmentIndex := 1;
 
     LMiddlewares := TList<THorseCallback>.Create;
-    LParams := TDictionary<string, string>.Create;
+    LParams := nil;
     try
       LNode := FindNode(LSegments, LStartSegmentIndex, FRoot, LMethodType, LMiddlewares, LParams);
       
       if LNode <> nil then
       begin
-        LKeys := LParams.Keys.ToArray;
-        for I := 0 to Length(LKeys) - 1 do
-          ARequest.Params.Dictionary.AddOrSetValue(LKeys[I], DecodeParam(LParams.Items[LKeys[I]]));
+        ARequest.MatchedRoute := LNode.FullPath;
+        if LParams <> nil then
+        begin
+          LKeys := LParams.Keys.ToArray;
+          for I := 0 to Length(LKeys) - 1 do
+            ARequest.Params.Dictionary.AddOrSetValue(LKeys[I], DecodeParam(LParams.Items[LKeys[I]]));
+        end;
 
         LCallbacksList := TList<THorseCallback>.Create;
         try
@@ -592,7 +602,8 @@ begin
       end;
     finally
       LMiddlewares.Free;
-      LParams.Free;
+      if LParams <> nil then
+        LParams.Free;
     end;
     
     AResponse.FlushCookiesToWebResponse;
