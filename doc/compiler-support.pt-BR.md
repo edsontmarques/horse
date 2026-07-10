@@ -76,6 +76,15 @@ Estes não usam um Provider self-hosted — o processo host é dono do socket. C
 - Funciona em todas as versões FPC listadas acima. **Não disponível no Delphi** — builds Delphi usam Indy.
 - Provider unit: `Horse.Provider.FPC.Daemon` / `Horse.Provider.FPC.HTTPApplication` / `Horse.Provider.FPC.LCL`. Cada uma `uses fphttpserver, fpHTTP, httpdefs`.
 - SSL via OpenSSL através dos handlers HTTP padrão do FPC — sem dependência do Indy.
+- Nota para FPC trunk / 3.3.x: versões recentes do `fcl-web` classificam
+  requisições de escrita (`POST`, `PUT`, `DELETE`, `PATCH`, `BATCH`) e consultam
+  o token CSRF de sessão do `TFPWebModule` antes de `DoOnRequest`. O Horse não
+  usa estado de sessão ou CSRF do `fcl-web` em seu pipeline de rotas; a segurança
+  da requisição pertence aos middlewares Horse e à aplicação. Nas versões do FPC
+  em que `TCustomFPWebModule.IsWriteRequest` existe, `Horse.WebModule` sobrescreve
+  esse classificador para que providers FPC baseados em `THorseWebModule` não
+  criem nem exijam uma sessão implícita do `fcl-web`. O override é protegido por versão e não é
+  compilado no FPC 3.2.x, onde o hook e o pré-cheque CSRF do trunk não existem.
 
 ### CrossSocket — opcional, entre compiladores
 

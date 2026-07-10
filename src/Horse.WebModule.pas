@@ -22,6 +22,7 @@ type
 {$IF DEFINED(FPC)}
   THorseWebModule = class(TFPWebModule)
     procedure DoOnRequest(ARequest: TRequest; AResponse: TResponse; var AHandled: Boolean); override;
+    class function IsWriteRequest(const aMethod: string): Boolean; override;
 {$ELSE}
   THorseWebModule = class(TWebModule)
 {$ENDIF}
@@ -81,6 +82,11 @@ end;
 procedure THorseWebModule.DoOnRequest(ARequest: {$IF DEFINED(FPC)}TRequest{$ELSE}  TWebRequest {$ENDIF}; AResponse: {$IF DEFINED(FPC)}TResponse{$ELSE}  TWebResponse {$ENDIF}; var AHandled: Boolean);
 begin
   HandlerAction(Self, ARequest, AResponse, AHandled);
+end;
+
+class function THorseWebModule.IsWriteRequest(const aMethod: string): Boolean;
+begin
+  Result := False;
 end;
 {$ENDIF}
 

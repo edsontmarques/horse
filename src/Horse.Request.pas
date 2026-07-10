@@ -11,9 +11,11 @@ uses
   SysUtils,
   fpHTTP,
   HTTPDefs,
+  Generics.Collections,
 {$ELSE}
   System.SysUtils,
   Web.HTTPApp,
+  System.Generics.Collections,
 {$IF CompilerVersion > 32.0}
   Web.ReqMulti,
 {$ENDIF}
@@ -74,6 +76,10 @@ type
   =========================================================================== }
     FCSRawWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF};
 { =========================================================================== }
+    FMatchedRoute: string;
+    FState: TObjectDictionary<string, TObject>;
+{ =========================================================================== }
+    function GetArena: THorseArenaAllocator;
     procedure InitializeQuery;
     procedure InitializeParams;
     procedure InitializeContentFields;
@@ -113,7 +119,7 @@ type
 { =========================================================================== }
     function ContentType: string; virtual;
     function Host: string; virtual;
-    property Arena: THorseArenaAllocator read FArena write FArena;
+    property Arena: THorseArenaAllocator read GetArena write FArena;
     function PathInfo: string; virtual;
     function RawWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF}; virtual;
     constructor Create(const AWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF}); overload;
@@ -204,6 +210,8 @@ type
 { PATCH-REQ-9  called by TRequestBridge.MapBody to cache the decoded body. }
     procedure SetBodyString(const AValue: string);
 { =========================================================================== }
+    property MatchedRoute: string read FMatchedRoute write FMatchedRoute;
+    property State: TObjectDictionary<string, TObject> read FState;
     destructor Destroy; override;
   end;
 
@@ -280,7 +288,7 @@ end;
 constructor THorseRequest.Create(const AWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF});
 begin
   FWebRequest := AWebRequest;
-  FSessions := THorseSessions.Create;
+  FState := TObjectDictionary<string, TObject>.Create([doOwnsValues]);
 end;
 
 { ===========================================================================
@@ -289,7 +297,7 @@ end;
 constructor THorseRequest.Create;
 begin
   FWebRequest := nil;
-  FSessions := THorseSessions.Create;
+  FState := TObjectDictionary<string, TObject>.Create([doOwnsValues]);
 end;
 { =========================================================================== }
 
@@ -350,9 +358,8 @@ begin
   if Assigned(FCSRawWebRequest) then
     FreeAndNil(FCSRawWebRequest);
 { end PATCH-REQ-8 }
-  if FOwnsArena and Assigned(FArena) then
-    FreeAndNil(FArena);
-  FOwnsArena := False;
+  if Assigned(FArena) then
+    FArena.Reset;
   if Assigned(FHeaders) then
     FreeAndNil(FHeaders);
   if Assigned(FQuery) then
@@ -363,14 +370,15 @@ begin
     FreeAndNil(FContentFields);
   if Assigned(FCookie) then
     FreeAndNil(FCookie);
-{ PATCH-SES-1 � reuse the existing THorseSessions object across pool recycles.
+{ PATCH-SES-1  reuse the existing THorseSessions object across pool recycles.
   THorseSessions.Clear calls TObjectDictionary.Clear which frees owned TSession
-  values before emptying the map � no allocation on the hot path. }
+  values before emptying the map  no allocation on the hot path. }
   if Assigned(FSessions) then
-    FSessions.Clear
-  else
-    FSessions := THorseSessions.Create;
+    FSessions.Clear;
 { end PATCH-SES-1 }
+  FMatchedRoute := '';
+  if Assigned(FState) then
+    FState.Clear;
 end;
 { =========================================================================== }
 
@@ -400,6 +408,8 @@ begin
 { end PATCH-REQ-8 }
   if FOwnsArena and Assigned(FArena) then
     FreeAndNil(FArena);
+  if Assigned(FState) then
+    FreeAndNil(FState);
   inherited;
 end;
 
@@ -736,6 +746,8 @@ end;
 
 function THorseRequest.Sessions: THorseSessions;
 begin
+  if not Assigned(FSessions) then
+    FSessions := THorseSessions.Create;
   Result := FSessions;
 end;
 
@@ -785,6 +797,16 @@ begin
 {$ELSE}
   Result := FWebRequest.RawPathInfo;
 {$ENDIF}
+end;
+
+function THorseRequest.GetArena: THorseArenaAllocator;
+begin
+  if not Assigned(FArena) then
+  begin
+    FArena := THorseArenaAllocator.Create(65536);
+    FOwnsArena := True;
+  end;
+  Result := FArena;
 end;
 
 function THorseRequest.GetPathSegments: TArray<THorseBufferSlice>;

@@ -225,7 +225,9 @@ uses
   {$ENDIF}
   ;
 
-{$I Horse.Core.Wrappers.inc}
+{$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+  {$I Horse.Core.Wrappers.inc}
+{$ENDIF}
 
 class function THorseCore.AddCallback(const ACallback: THorseCallback): THorseCore;
 begin
@@ -584,8 +586,7 @@ end;
 
 class function THorseCore.GetCallback(const ACallbackRequest: THorseCallbackRequestResponse): THorseCallback;
 begin
-{$IFDEF FPC}
-  {$IF DEFINED(FPC)}
+  {$IF (DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES))}
   if GCallbacks2Count < 64 then
   begin
     GCallbacks2[GCallbacks2Count] := ACallbackRequest;
@@ -594,21 +595,20 @@ begin
   end
   else
     Result := Pointer(@ACallbackRequest);
-  {$IFEND}
-{$ELSE}
+  {$ELSE}
   Result :=
-    procedure(Req: THorseRequest; Res: THorseResponse; Next: TProc)
+    procedure(Req: THorseRequest; Res: THorseResponse; Next: TNextProc)
     begin
       ACallbackRequest(Req, Res);
     end;
-{$IFEND}
+  {$ENDIF}
 end;
 
 {$IFNDEF FPC}
 class function THorseCore.GetCallback(const ACallbackResponse: THorseCallbackResponse): THorseCallback;
 begin
   Result :=
-      procedure(Req: THorseRequest; Res: THorseResponse; Next: TProc)
+    procedure(Req: THorseRequest; Res: THorseResponse; Next: TProc)
     begin
       ACallbackResponse(Res);
     end;
@@ -617,8 +617,7 @@ end;
 
 class function THorseCore.GetCallback(const ACallbackRequest: THorseCallbackRequest): THorseCallback;
 begin
-{$IFDEF FPC}
-  {$IF DEFINED(FPC)}
+  {$IF (DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES))}
   if GCallbacks1Count < 64 then
   begin
     GCallbacks1[GCallbacks1Count] := ACallbackRequest;
@@ -627,15 +626,14 @@ begin
   end
   else
     Result := Pointer(@ACallbackRequest);
-  {$IFEND}
-{$ELSE}
+  {$ELSE}
   Result :=
-    procedure(Req: THorseRequest; Res: THorseResponse; Next: TProc)
+    procedure(Req: THorseRequest; Res: THorseResponse; Next: TNextProc)
     begin
       Res.Status(THTTPStatus.NoContent);
       ACallbackRequest(Req);
     end;
-{$IFEND}
+  {$ENDIF}
 end;
 
 {$IFNDEF FPC}

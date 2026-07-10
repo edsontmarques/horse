@@ -34,8 +34,8 @@ type
 {$IF DEFINED(FPC)}
   THorseHeaderComparer = class(TInterfacedObject, IEqualityComparer<string>)
   public
-    function Equals(constref A, B: string): Boolean;
-    function GetHashCode(constref Value: string): DWord;
+    function Equals(const A, B: string): Boolean; reintroduce;
+    function GetHashCode(const Value: string): LongWord; reintroduce;
   end;
 {$ENDIF}
 
@@ -65,7 +65,7 @@ uses
   Horse.Rtti;
 
 {$IF DEFINED(FPC)}
-function THorseHeaderComparer.Equals(constref A, B: string): Boolean;
+function THorseHeaderComparer.Equals(const A, B: string): Boolean;
 begin
   Result := SameText(A, B);
 end;
@@ -74,7 +74,7 @@ end;
   zero-allocation para evitar a alocacao temporaria gerada por LowerCase no FPC.
   Isso otimiza o hot path de busca de headers e resolve problemas de link de
   comparadores nativos sob FPC. }
-function THorseHeaderComparer.GetHashCode(constref Value: string): DWord;
+function THorseHeaderComparer.GetHashCode(const Value: string): LongWord;
 var
   I: Integer;
   LChar: Char;
@@ -85,7 +85,7 @@ begin
     LChar := Value[I];
     if LChar in ['A'..'Z'] then
       Inc(LChar, 32);
-    Result := ((Result shl 5) + Result) + Ord(LChar);
+    Result := LongWord((((QWord(Result) shl 5) + QWord(Result)) + Ord(LChar)) and High(LongWord));
   end;
 end;
 {$ENDIF}
