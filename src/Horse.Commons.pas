@@ -400,11 +400,18 @@ begin
 end;
 
 function THorseBufferSlice.ToString: string;
+var
+  LBuffer: UnicodeString;
 begin
   if FLen <= 0 then
     Result := ''
   else
-    Result := TEncoding.UTF8.GetString(FBuffer, FStart, FLen);
+  begin
+    LBuffer := TEncoding.UTF8.GetString(FBuffer, FStart, FLen);
+    Result := {$IFDEF FPC}
+      UTF8Encode(LBuffer) {$ELSE}
+      LBuffer {$ENDIF};
+  end;
 end;
 
 function THorseBufferSlice.Compare(const AText: string; ACaseInsensitive: Boolean): Boolean;

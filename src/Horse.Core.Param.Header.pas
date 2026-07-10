@@ -34,8 +34,8 @@ type
 {$IF DEFINED(FPC)}
   THorseHeaderComparer = class(TInterfacedObject, IEqualityComparer<string>)
   public
-    function Equals(const A, B: string): Boolean;
-    function GetHashCode(const Value: string): LongWord;
+    function Equals(const A, B: string): Boolean; reintroduce;
+    function GetHashCode(const Value: string): LongWord; reintroduce;
   end;
 {$ENDIF}
 

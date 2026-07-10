@@ -106,6 +106,7 @@ function StringToBytes(const AStr: string): TBytes;
 var
   I: Integer;
 begin
+  Result := Default(TBytes);
   SetLength(Result, Length(AStr));
   for I := 1 to Length(AStr) do
     Result[I - 1] := Byte(AStr[I]);
@@ -512,7 +513,6 @@ var
   LAllow: string;
 begin
   try
-    Result := False;
     LRawWebRequest := ARequest.RawWebRequest;
     if not Assigned(LRawWebRequest) then
       LMethodType := ARequest.MethodType
