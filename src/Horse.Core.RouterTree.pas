@@ -20,7 +20,8 @@ uses
   Horse.Response,
   Horse.Callback,
   Horse.Core.Router.Contract,
-  Horse.Commons;
+  Horse.Commons,
+  Horse.Core.Regex;
 
 type
   PHorseRouterTree = ^THorseRouterTree;
@@ -39,6 +40,8 @@ type
     FIsParamsKey: Boolean;
     FRouterRegex: string;
     FIsRouterRegex: Boolean;
+    FIsOptional: Boolean;
+    FRegexMatcher: THorseRegex;
     {$IF DEFINED(FPC)}
     FMiddleware: TList<THorseCallback>;
     FRegexedKeys: TList<string>;
@@ -86,8 +89,10 @@ uses
   System.SysUtils,
   System.RegularExpressions,
   System.SyncObjs,
+  System.Diagnostics,
 {$ENDIF}
-  Horse.Core.RouterTree.NextCaller;
+  Horse.Core.RouterTree.NextCaller,
+  Horse, Horse.Core;
 
 threadvar
   TlsNextCaller: TNextCaller;
@@ -121,10 +126,104 @@ end;
 
 
 
+{$IFDEF FPC}
+threadvar
+  GCurrentTreeExecutor: Pointer;
+
+type
+  TRouterTreeExecutor = class
+  private
+    FRouter: THorseRouterTree;
+    FRequest: THorseRequest;
+    FResponse: THorseResponse;
+    FResult: Boolean;
+    procedure DoExecuteInternal;
+  public
+    constructor Create(ARouter: THorseRouterTree; AReq: THorseRequest; ARes: THorseResponse);
+    function Run: Boolean;
+  end;
+
+procedure RouterTreeExecutorDoExecuteRoute;
+begin
+  TRouterTreeExecutor(GCurrentTreeExecutor).DoExecuteInternal;
+end;
+
+procedure RouterTreeExecutorDoPreParsing;
+begin
+  THorse.ExecutePreParsing(TRouterTreeExecutor(GCurrentTreeExecutor).FRequest, TRouterTreeExecutor(GCurrentTreeExecutor).FResponse, RouterTreeExecutorDoExecuteRoute);
+end;
+
+constructor TRouterTreeExecutor.Create(ARouter: THorseRouterTree; AReq: THorseRequest; ARes: THorseResponse);
+begin
+  FRouter := ARouter;
+  FRequest := AReq;
+  FResponse := ARes;
+  FResult := False;
+end;
+
+function TRouterTreeExecutor.Run: Boolean;
+var
+  LStopwatch: TStopwatch;
+begin
+  LStopwatch := TStopwatch.StartNew;
+  FResponse.Request := FRequest;
+  GCurrentTreeExecutor := Self;
+  try
+    try
+      THorse.ExecuteOnRequest(FRequest, FResponse, RouterTreeExecutorDoPreParsing);
+      Result := FResult;
+    except
+      on E: Exception do
+      begin
+        Result := False;
+        raise;
+      end;
+    end;
+  finally
+    LStopwatch.Stop;
+    THorseCore.ExecuteOnTelemetry(FRequest, FResponse, LStopwatch.Elapsed.TotalMilliseconds);
+    THorse.ExecuteOnResponse(FRequest, FResponse);
+  end;
+end;
+
+procedure TRouterTreeExecutor.DoExecuteInternal;
+var
+  LSegments, LSegmentsNotFound: TArray<THorseBufferSlice>;
+  LMethodType: TMethodType;
+  LRawWebRequest: TRequest;
+  LBufferNotFound: TBytes;
+begin
+  LRawWebRequest := FRequest.RawWebRequest;
+  if not Assigned(LRawWebRequest) then
+    LMethodType := FRequest.MethodType
+  else
+    LMethodType := TMethodType.FromString(LRawWebRequest.Method);
+
+  LSegments := FRequest.GetPathSegments;
+  FResult := FRouter.ExecuteInternal(LSegments, 0, LMethodType, FRequest, FResponse);
+  if not FResult then
+  begin
+    SetLength(LSegmentsNotFound, 2);
+    LBufferNotFound := TEncoding.UTF8.GetBytes('/*');
+    LSegmentsNotFound[0] := THorseBufferSlice.Create(LBufferNotFound, 0, 0);
+    LSegmentsNotFound[1] := THorseBufferSlice.Create(LBufferNotFound, 1, 1);
+    
+    FResult := FRouter.ExecuteInternal(LSegmentsNotFound, 0, LMethodType, FRequest, FResponse);
+    if FResult and (FResponse.Status = THTTPStatus.MethodNotAllowed.ToInteger) then
+      FResponse.Send('Not Found').Status(THTTPStatus.NotFound);
+  end;
+end;
+{$ENDIF}
+
 class function THorseRouterTree.NormalizeParamKey(const APart: string): string;
 begin
   if APart.StartsWith(':') then
-    Result := ':_param'
+  begin
+    if APart.Contains('(') or APart.EndsWith('?') then
+      Result := APart
+    else
+      Result := ':_param';
+  end
   else
     Result := APart;
 end;
@@ -165,10 +264,29 @@ var
   LPair: TPair<string, THorseRouterTree>;
 begin
   LIsGroup := False;
-  LCurrent := ASegments[AIndex];
-  
   LFound := False;
   LAcceptable := nil;
+
+  if AIndex >= Length(ASegments) then
+  begin
+    for LPair in FRoute do
+    begin
+      if LPair.Value.FIsOptional then
+      begin
+        LAcceptable := LPair.Value;
+        if LAcceptable.HasNext(AHTTPType, ASegments, AIndex - 1) then
+        begin
+          LFound := LAcceptable.ExecuteInternal(ASegments, AIndex, AHTTPType, ARequest, AResponse);
+          if LFound then
+            Exit(True);
+        end;
+      end;
+    end;
+    Exit(False);
+  end;
+
+  LCurrent := ASegments[AIndex];
+  
   for LPair in FRoute do
   begin
     if (LPair.Key <> '*') and LCurrent.Compare(LPair.Key) then
@@ -250,6 +368,8 @@ begin
   FreeAndNil(FCallBack);
   {$ENDIF}
   FreeAndNil(FRoute);
+  if Assigned(FRegexMatcher) then
+    FRegexMatcher.Free;
   FRegexedKeys.Clear;
   FRegexedKeys.Free;
   FHandlerMethods.Clear;
@@ -258,36 +378,92 @@ begin
 end;
 
 function THorseRouterTree.Execute(const ARequest: THorseRequest; const AResponse: THorseResponse): Boolean;
+{$IF DEFINED(FPC)}
+var
+  LExecutor: TRouterTreeExecutor;
+begin
+  LExecutor := TRouterTreeExecutor.Create(Self, ARequest, AResponse);
+  try
+    Result := LExecutor.Run;
+  finally
+    LExecutor.Free;
+  end;
+end;
+{$ELSE}
 var
   LSegments, LSegmentsNotFound: TArray<THorseBufferSlice>;
   LMethodType: TMethodType;
   LRawWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF};
   LBufferNotFound: TBytes;
+  LResult: Boolean;
+  LStopwatch: TStopwatch;
 begin
-  LRawWebRequest := ARequest.RawWebRequest;
-  if not Assigned(LRawWebRequest) then
-  begin
-    LMethodType := ARequest.MethodType;
-  end
-  else
-  begin
-    LMethodType := TMethodType.FromString(LRawWebRequest.Method);
+  LStopwatch := TStopwatch.StartNew;
+  LResult := False;
+  AResponse.Request := ARequest;
+  try
+    try
+      LRawWebRequest := ARequest.RawWebRequest;
+      if not Assigned(LRawWebRequest) then
+      begin
+        LMethodType := ARequest.MethodType;
+      end
+      else
+      begin
+        LMethodType := TMethodType.FromString(LRawWebRequest.Method);
+      end;
+
+      THorse.ExecuteOnRequest(ARequest, AResponse,
+        procedure
+        begin
+          THorse.ExecutePreParsing(ARequest, AResponse,
+            procedure
+            begin
+              LSegments := ARequest.GetPathSegments;
+              LResult := ExecuteInternal(LSegments, 0, LMethodType, ARequest, AResponse);
+              if not LResult then
+              begin
+                SetLength(LSegmentsNotFound, 2);
+                LBufferNotFound := TEncoding.UTF8.GetBytes('/*');
+                LSegmentsNotFound[0] := THorseBufferSlice.Create(LBufferNotFound, 0, 0);
+                LSegmentsNotFound[1] := THorseBufferSlice.Create(LBufferNotFound, 1, 1);
+                
+                LResult := ExecuteInternal(LSegmentsNotFound, 0, LMethodType, ARequest, AResponse);
+                if LResult and (AResponse.Status = THTTPStatus.MethodNotAllowed.ToInteger) then
+                  AResponse.Send('Not Found').Status(THTTPStatus.NotFound);
+              end;
+            end);
+        end);
+      Result := LResult;
+    except
+      on E: Exception do
+      begin
+        if THorse.HasOnError then
+        begin
+          if E is EHorseCallbackInterrupted then
+          begin
+            Result := True;
+          end
+          else
+          begin
+            THorse.ExecuteOnError(ARequest, AResponse, E);
+            Result := True;
+          end;
+        end
+        else
+        begin
+          raise;
+        end;
+      end;
+    end;
+    AResponse.FlushCookiesToWebResponse;
+  finally
+    LStopwatch.Stop;
+    THorseCore.ExecuteOnTelemetry(ARequest, AResponse, LStopwatch.Elapsed.TotalMilliseconds);
+    THorse.ExecuteOnResponse(ARequest, AResponse);
   end;
-  LSegments := ARequest.GetPathSegments;
-  Result := ExecuteInternal(LSegments, 0, LMethodType, ARequest, AResponse);
-  if not Result then
-  begin
-    SetLength(LSegmentsNotFound, 2);
-    LBufferNotFound := TEncoding.UTF8.GetBytes('/*');
-    LSegmentsNotFound[0] := THorseBufferSlice.Create(LBufferNotFound, 0, 0);
-    LSegmentsNotFound[1] := THorseBufferSlice.Create(LBufferNotFound, 1, 1);
-    
-    Result := ExecuteInternal(LSegmentsNotFound, 0, LMethodType, ARequest, AResponse);
-    if Result and (AResponse.Status = THTTPStatus.MethodNotAllowed.ToInteger) then
-      AResponse.Send('Not Found').Status(THTTPStatus.NotFound);
-  end;
-  AResponse.FlushCookiesToWebResponse;
 end;
+{$ENDIF}
 
 function THorseRouterTree.ExecuteInternal(const ASegments: TArray<THorseBufferSlice>; AIndex: Integer; const AHTTPType: TMethodType; const ARequest: THorseRequest;
   const AResponse: THorseResponse; const AIsGroup: Boolean = False): Boolean;
@@ -455,16 +631,19 @@ begin
   Result := False;
   if (Length(APaths) <= AIndex) then
     Exit(False);
-  if (Length(APaths) - 1 = AIndex) and (APaths[AIndex].Compare(FPart) or FIsParamsKey) then
-    Exit(FCallBack.ContainsKey(AMethod) or (AMethod = mtAny));
 
-{$IFNDEF FPC}
-  if FIsRouterRegex then
+  if FIsRouterRegex and Assigned(FRegexMatcher) then
   begin
-    Result := TRegEx.IsMatch(APaths[AIndex].ToString, Format('^%s$', [FRouterRegex]));
-    Exit;
+    if not FRegexMatcher.Match(APaths[AIndex].ToString) then
+      Exit(False);
+    if Length(APaths) - 1 = AIndex then
+      Exit(FCallBack.ContainsKey(AMethod) or (AMethod = mtAny));
+  end
+  else if (Length(APaths) - 1 = AIndex) and (APaths[AIndex].Compare(FPart) or FIsParamsKey) then
+  begin
+    Exit(FCallBack.ContainsKey(AMethod) or (AMethod = mtAny));
   end;
-{$ENDIF}
+
   LNext := APaths[AIndex + 1];
   Inc(AIndex);
   
@@ -505,17 +684,60 @@ var
   {$ENDIF}
   LForceRouter: THorseRouterTree;
   LRawPart: string;
+  LOpenParenthesis: Integer;
+  LCloseParenthesis: Integer;
 begin
   if not FIsInitialized then
   begin
     LRawPart := APath.Dequeue;
     FPart := LRawPart;
 
-    FIsParamsKey := FPart.StartsWith(':');
-    FTag := FPart.Substring(1, Length(FPart) - 1);
+    FIsOptional := False;
+    FIsRouterRegex := False;
+    FRouterRegex := '';
+    FRegexMatcher := nil;
 
-    FIsRouterRegex := FPart.StartsWith('(') and FPart.EndsWith(')');
-    FRouterRegex := FPart;
+    FIsParamsKey := FPart.StartsWith(':');
+    if FIsParamsKey then
+    begin
+      LNormalizedNextPart := FPart.Substring(1);
+
+      if LNormalizedNextPart.EndsWith('?') then
+      begin
+        FIsOptional := True;
+        LNormalizedNextPart := LNormalizedNextPart.Substring(0, LNormalizedNextPart.Length - 1);
+      end;
+
+      LOpenParenthesis := LNormalizedNextPart.IndexOf('(');
+      if LOpenParenthesis >= 0 then
+      begin
+        LCloseParenthesis := LNormalizedNextPart.IndexOf(')');
+        if LCloseParenthesis > LOpenParenthesis then
+        begin
+          FIsRouterRegex := True;
+          FTag := LNormalizedNextPart.Substring(0, LOpenParenthesis);
+          FRouterRegex := LNormalizedNextPart.Substring(LOpenParenthesis + 1, LCloseParenthesis - LOpenParenthesis - 1);
+          FRegexMatcher := THorseRegex.Create(FRouterRegex);
+        end;
+      end;
+
+      if not FIsRouterRegex then
+        FTag := LNormalizedNextPart;
+    end
+    else
+    begin
+      if FPart.StartsWith('(') and FPart.EndsWith(')') then
+      begin
+        FIsRouterRegex := True;
+        FRouterRegex := FPart.Substring(1, FPart.Length - 2);
+        FRegexMatcher := THorseRegex.Create(FRouterRegex);
+        FTag := '';
+      end
+      else
+      begin
+        FTag := '';
+      end;
+    end;
 
     FIsInitialized := True;
   end

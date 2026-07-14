@@ -1,6 +1,6 @@
 unit Horse.Provider.FPC.HTTPApplication;
 
-{ PATCH-FPCHTTP-1: ListenWithConfig override — same root cause as PATCH-CONSOLE-1. }
+{ PATCH-FPCHTTP-1: ListenWithConfig override â€” same root cause as PATCH-CONSOLE-1. }
 
 {$IF DEFINED(FPC)}
 {$MODE DELPHI}{$H+}
@@ -44,11 +44,16 @@ type
     class property Host: string read GetHost write SetHost;
     class property Port: Integer read GetPort write SetPort;
     class property ListenQueue: Integer read GetListenQueue write SetListenQueue;
+    class function GetActivePort: Integer; override;
     class procedure Listen; overload; override;
-    class procedure Listen(const APort: Integer; const AHost: string = '0.0.0.0'; const ACallback: TProc = nil); reintroduce; overload; static;
-    class procedure Listen(const APort: Integer; const ACallback: TProc); reintroduce; overload; static;
-    class procedure Listen(const AHost: string; const ACallback: TProc = nil); reintroduce; overload; static;
-    class procedure Listen(const ACallback: TProc); reintroduce; overload; static;
+    class procedure Listen(const APort: Integer; const AHost: string = '0.0.0.0';
+      const ACallbackListen: TProc = nil; const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
+    class procedure Listen(const APort: Integer; const ACallbackListen: TProc;
+      const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
+    class procedure Listen(const AHost: string; const ACallbackListen: TProc = nil;
+      const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
+    class procedure Listen(const ACallbackListen: TProc;
+      const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
     // PATCH-FPCHTTP-1
     class procedure ListenWithConfig(const APort: Integer;
       const AConfig: THorseCrossSocketConfig); override;
@@ -100,10 +105,16 @@ begin
   Result := FPort;
 end;
 
+class function THorseProvider.GetActivePort: Integer;
+begin
+  Result := FPort;
+end;
+
 class procedure THorseProvider.InternalListen;
 var
   LHTTPApplication: THTTPApplication;
 begin
+  TriggerBeforeListen;
   inherited;
   if FPort <= 0 then
     FPort := GetDefaultPort;
@@ -140,27 +151,28 @@ begin
   InternalListen;;
 end;
 
-class procedure THorseProvider.Listen(const APort: Integer; const AHost: string; const ACallback: TProc);
+class procedure THorseProvider.Listen(const APort: Integer; const AHost: string; const ACallbackListen, ACallbackStopListen: TProc);
 begin
   SetPort(APort);
   SetHost(AHost);
-  SetOnListen(ACallback);
+  SetOnListen(ACallbackListen);
+  SetOnStopListen(ACallbackStopListen);
   InternalListen;
 end;
 
-class procedure THorseProvider.Listen(const AHost: string; const ACallback: TProc);
+class procedure THorseProvider.Listen(const APort: Integer; const ACallbackListen, ACallbackStopListen: TProc);
 begin
-  Listen(FPort, AHost, ACallback);
+  Listen(APort, FHost, ACallbackListen, ACallbackStopListen);
 end;
 
-class procedure THorseProvider.Listen(const ACallback: TProc);
+class procedure THorseProvider.Listen(const AHost: string; const ACallbackListen, ACallbackStopListen: TProc);
 begin
-  Listen(FPort, FHost, ACallback);
+  Listen(FPort, AHost, ACallbackListen, ACallbackStopListen);
 end;
 
-class procedure THorseProvider.Listen(const APort: Integer; const ACallback: TProc);
+class procedure THorseProvider.Listen(const ACallbackListen, ACallbackStopListen: TProc);
 begin
-  Listen(APort, FHost, ACallback);
+  Listen(FPort, FHost, ACallbackListen, ACallbackStopListen);
 end;
 
 // PATCH-FPCHTTP-1

@@ -87,6 +87,19 @@ Estes não são mantidos pela HashLoad mas estão listados aqui por serem usados
 | [dliocode/horse-datalogger](https://github.com/dliocode/horse-datalogger) | Logger de dados estruturado | ✔️ | ❌ |
 | [weslleycapelari/horse-documentation](https://github.com/weslleycapelari/horse-documentation) | Geração automática de docs de API | ✔️ | ❌ |
 | [weslleycapelari/horse-validator](https://github.com/weslleycapelari/horse-validator) | Validação de payload de requisição | ✔️ | ❌ |
+| [regyssilveira/horse-rate-limit](https://github.com/regyssilveira/horse-rate-limit) | Controle de limite de requisições (Rate Limiting) com suporte a múltiplos storages | ✔️ | ✔️ |
+| [regyssilveira/horse-compression-v2](https://github.com/regyssilveira/horse-compression-v2) | Compressão de alta performance com suporte a Gzip, Deflate e Brotli | ✔️ | ✔️ |
+| [regyssilveira/horse-static](https://github.com/regyssilveira/horse-static) | Servidor de arquivos estáticos de alta performance com suporte a Range, Cache e SPA Fallback | ✔️ | ✔️ |
+| [regyssilveira/horse-dto](https://github.com/regyssilveira/horse-dto) | Middleware de auto-binding e validação declarativa de dados | ✔️ | ✔️ |
+| [regyssilveira/horse-rbac](https://github.com/regyssilveira/horse-rbac) | Controle de acesso baseado em funções (RBAC) e escopos (scopes) | ✔️ | ✔️ |
+| [regyssilveira/horse-schema-validation](https://github.com/regyssilveira/horse-schema-validation) | Middleware de validação de esquemas (schemas) de payload de requisições | ✔️ | ✔️ |
+| [regyssilveira/horse-multipart](https://github.com/regyssilveira/horse-multipart) | Middleware para processamento e parsing de corpos de requisição multipart/form-data | ✔️ | ✔️ |
+| [regyssilveira/horse-helmet](https://github.com/regyssilveira/horse-helmet) | Middleware de segurança para proteção e configuração de cabeçalhos HTTP | ✔️ | ✔️ |
+| [regyssilveira/horse-ssl-redirect](https://github.com/regyssilveira/horse-ssl-redirect) | Redirecionamento automático de requisições HTTP inseguras para HTTPS | ✔️ | ✔️ |
+| [regyssilveira/horse-crud](https://github.com/regyssilveira/horse-crud) | Middleware para o framework Horse voltado à geração automática e dinâmica de rotas CRUD a partir de entidades decoradas | ✔️ | ✔️ |
+| [regyssilveira/horse-request-id](https://github.com/regyssilveira/horse-request-id) | Middleware de geração e rastreamento de Request ID (Correlation ID) para o ecossistema do framework Horse | ✔️ | ✔️ |
+| [regyssilveira/horse-sanitize](https://github.com/regyssilveira/horse-sanitize) | Middleware para sanitizar parâmetros de requisições do ecossistema Horse contra XSS e injeções nocivas | ✔️ | ✔️ |
+
 
 ---
 

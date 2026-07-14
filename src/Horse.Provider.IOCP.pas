@@ -132,7 +132,7 @@ type
     {$ENDIF}
 
     function GetFieldByName(const AName: string): string;
-    procedure PopulateHeaders(ADict: TDictionary<string, string>);
+    procedure PopulateHeaders(ADest: TStrings);
     procedure PopulateQueryFields(ADest: TStrings);
     procedure PopulateContentFields(ADest: TStrings);
     procedure PopulateCookieFields(ADest: TStrings);
@@ -260,6 +260,7 @@ type
     class procedure Listen(const AHost: string; const ACallbackListen: Horse.Proc.TProc = nil; const ACallbackStopListen: Horse.Proc.TProc = nil); reintroduce; overload; static;
     class procedure Listen(const ACallbackListen: Horse.Proc.TProc; const ACallbackStopListen: Horse.Proc.TProc = nil); reintroduce; overload; static;
     class procedure ListenWithConfig(const APort: Integer; const AConfig: THorseCrossSocketConfig); override;
+    class function GetActivePort: Integer; override;
     class procedure StopListen; override;
     class function IsRunning: Boolean;
 
@@ -626,18 +627,18 @@ begin
   Result := ResolveHeader(AName);
 end;
 
-procedure TIocpRawRequest.PopulateHeaders(ADict: TDictionary<string, string>);
+procedure TIocpRawRequest.PopulateHeaders(ADest: TStrings);
 var
   I: Integer;
   Seg: THeaderSegment;
-  K, V: string;
+  K, V: AnsiString;
 begin
   for I := 0 to Length(FHeaders) - 1 do
   begin
     Seg := FHeaders[I];
-    K := TEncoding.UTF8.GetString(FBuffer, Seg.KeyStart, Seg.KeyLen).Trim;
-    V := TEncoding.UTF8.GetString(FBuffer, Seg.ValueStart, Seg.ValueLen).Trim;
-    ADict.AddOrSetValue(K, V);
+    SetString(K, PAnsiChar(@FBuffer[Seg.KeyStart]), Seg.KeyLen);
+    SetString(V, PAnsiChar(@FBuffer[Seg.ValueStart]), Seg.ValueLen);
+    ADest.Add(string(Trim(K)) + ADest.NameValueSeparator + string(Trim(V)));
   end;
 end;
 
@@ -926,12 +927,19 @@ begin
   begin
     SendStreamResponse(ARes.ContentStream, ARes.CustomHeaders);
     Exit;
+  end
+  else if (ARes.RawWebResponse <> nil) and (TInterfacedWebResponse(ARes.RawWebResponse).ContentStream <> nil) then
+  begin
+    SendStreamResponse(TInterfacedWebResponse(ARes.RawWebResponse).ContentStream, ARes.CustomHeaders);
+    Exit;
   end;
 
   if Length(ARes.BodyBytes) > 0 then
     LBodyBytes := ARes.BodyBytes
   else if ARes.BodyText <> '' then
-    LBodyBytes := TEncoding.UTF8.GetBytes(ARes.BodyText);
+    LBodyBytes := TEncoding.UTF8.GetBytes(ARes.BodyText)
+  else if (ARes.RawWebResponse <> nil) and (TInterfacedWebResponse(ARes.RawWebResponse).Content <> '') then
+    LBodyBytes := TEncoding.UTF8.GetBytes(TInterfacedWebResponse(ARes.RawWebResponse).Content);
 
   if Length(LBodyBytes) > 0 then
     FHeaders.AddOrSetValue('Content-Length', IntToStr(Length(LBodyBytes)))
@@ -1435,6 +1443,11 @@ begin
   end;
 end;
 
+class function THorseProviderIOCP.GetActivePort: Integer;
+begin
+  Result := FPort;
+end;
+
 class procedure THorseProviderIOCP.InternalListen;
 const
   GuidAcceptEx: TGUID = '{B5367DF1-CBAC-11CF-95CA-00805F48A192}';
@@ -1444,6 +1457,7 @@ var
   LWorker: THorseIocpWorker;
   LPtr: Pointer;
 begin
+  TriggerBeforeListen;
   FListenSocket := CreateListenSocket(FPort, FHost);
   
   // Obtém ponteiros das extensões do Winsock
@@ -1480,6 +1494,7 @@ class procedure THorseProviderIOCP.InternalStopListen;
 var
   I: Integer;
 begin
+  TriggerBeforeStop;
   FRunning := False;
   
   for I := 0 to FWorkers.Count - 1 do
@@ -1503,21 +1518,11 @@ end;
 
 class procedure THorseProviderIOCP.InternalListenLoop(const ACallbackListen, ACallbackStopListen: Horse.Proc.TProc);
 begin
-  try
-    InternalListen;
-  except
-    Exit;
-  end;
-  if Assigned(ACallbackListen) then
-    ACallbackListen()
-  else
-    DoOnListen;
+  InternalListen;
+  DoOnListen;
   while FRunning do
     Sleep(100);
-  if Assigned(ACallbackStopListen) then
-    ACallbackStopListen()
-  else
-    DoOnStopListen;
+  DoOnStopListen;
 end;
 
 class procedure THorseProviderIOCP.PostReadConnection(AContext: TIocpConnectionContext);
