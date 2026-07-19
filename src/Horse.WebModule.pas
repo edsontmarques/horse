@@ -23,7 +23,7 @@ type
 {$IF DEFINED(FPC)}
   THorseWebModule = class(TFPWebModule)
     procedure DoOnRequest(ARequest: TRequest; AResponse: TResponse; var AHandled: Boolean); override;
-    class function IsWriteRequest(const aMethod: string): Boolean; override;
+    class function IsWriteRequest(const aMethod: string): Boolean;
 {$ELSE}
   THorseWebModule = class(TWebModule)
 {$ENDIF}
