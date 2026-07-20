@@ -51,6 +51,20 @@ type
     procedure TestMiddlewareCorsHeaders;
     [Test]
     procedure TestMiddlewareCorsPreflightOptions;
+    [Test]
+    procedure TestCustomHeader;
+    [Test]
+    procedure TestFluentRouteMiddlewares;
+    [Test]
+    procedure TestStaticRouteMiddlewares;
+    [Test]
+    procedure TestOnErrorDefault500;
+    [Test]
+    procedure TestOnErrorCustomHandler;
+    [Test]
+    procedure TestOnErrorCallbackCrash;
+    [Test]
+    procedure TestOnErrorHorseException;
 
   end;
 
@@ -213,6 +227,135 @@ begin
     Assert.AreEqual('*', LResponse.HeaderValue['Access-Control-Allow-Origin']);
     Assert.AreEqual('GET, POST, OPTIONS', LResponse.HeaderValue['Access-Control-Allow-Methods']);
   finally
+    LClient.Free;
+  end;
+end;
+
+procedure TApiTest.TestCustomHeader;
+var
+  LClient: THTTPClient;
+  LResponse: IHTTPResponse;
+  LHeaders: TNetHeaders;
+begin
+  LClient := THTTPClient.Create;
+  try
+    SetLength(LHeaders, 1);
+    LHeaders[0] := TNetHeader.Create('X-Custom-Header', 'CustomValue');
+    LResponse := LClient.Get('http://localhost:9000/Api/CustomHeader', nil, LHeaders);
+    Assert.AreEqual(200, LResponse.StatusCode);
+    Assert.AreEqual('CustomValue', LResponse.ContentAsString);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TApiTest.TestFluentRouteMiddlewares;
+var
+  LClient: THTTPClient;
+  LResponse: IHTTPResponse;
+begin
+  LClient := THTTPClient.Create;
+  try
+    LResponse := LClient.Get('http://localhost:9000/Api/RouteMiddlewares');
+    Assert.AreEqual(200, LResponse.StatusCode);
+    Assert.AreEqual('RouteMiddlewaresData', LResponse.ContentAsString);
+    Assert.AreEqual('true', LResponse.HeaderValue['X-Route-Step1']);
+    Assert.AreEqual('true', LResponse.HeaderValue['X-Route-Step2']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TApiTest.TestStaticRouteMiddlewares;
+var
+  LClient: THTTPClient;
+  LResponse: IHTTPResponse;
+begin
+  LClient := THTTPClient.Create;
+  try
+    LResponse := LClient.Get('http://localhost:9000/Api/StaticRouteMiddlewares');
+    Assert.AreEqual(200, LResponse.StatusCode);
+    Assert.AreEqual('StaticRouteMiddlewaresData', LResponse.ContentAsString);
+    Assert.AreEqual('true', LResponse.HeaderValue['X-Route-Step1']);
+    Assert.AreEqual('true', LResponse.HeaderValue['X-Route-Step2']);
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure TApiTest.TestOnErrorDefault500;
+var
+  LClient: THTTPClient;
+  LResponse: IHTTPResponse;
+begin
+  LClient := THTTPClient.Create;
+  try
+    THorse.OnError(nil);
+    LResponse := LClient.Get('http://localhost:9000/Api/Exception/Normal');
+    Assert.AreEqual(500, LResponse.StatusCode);
+    Assert.IsTrue(LResponse.ContentAsString.Contains('Internal Application Error: Simulated Normal Error'));
+  finally
+    LClient.Free;
+  end;
+end;
+
+procedure CustomErrorHandler(const ARequest: THorseRequest; const AResponse: THorseResponse; const AException: Exception);
+begin
+  AResponse.Send('Custom Error: ' + AException.Message).Status(THTTPStatus.ServiceUnavailable);
+end;
+
+procedure TApiTest.TestOnErrorCustomHandler;
+var
+  LClient: THTTPClient;
+  LResponse: IHTTPResponse;
+begin
+  LClient := THTTPClient.Create;
+  try
+    THorse.OnError(CustomErrorHandler);
+    LResponse := LClient.Get('http://localhost:9000/Api/Exception/Normal');
+    Assert.AreEqual(503, LResponse.StatusCode);
+    Assert.AreEqual('Custom Error: Simulated Normal Error', LResponse.ContentAsString);
+  finally
+    THorse.OnError(nil);
+    LClient.Free;
+  end;
+end;
+
+procedure CrashingErrorHandler(const ARequest: THorseRequest; const AResponse: THorseResponse; const AException: Exception);
+begin
+  raise Exception.Create('Crash in OnError');
+end;
+
+procedure TApiTest.TestOnErrorCallbackCrash;
+var
+  LClient: THTTPClient;
+  LResponse: IHTTPResponse;
+begin
+  LClient := THTTPClient.Create;
+  try
+    THorse.OnError(CrashingErrorHandler);
+    LResponse := LClient.Get('http://localhost:9000/Api/Exception/Normal');
+    Assert.AreEqual(500, LResponse.StatusCode);
+    Assert.IsTrue(LResponse.ContentAsString.Contains('Internal Application Error in OnError: Crash in OnError'));
+  finally
+    THorse.OnError(nil);
+    LClient.Free;
+  end;
+end;
+
+procedure TApiTest.TestOnErrorHorseException;
+var
+  LClient: THTTPClient;
+  LResponse: IHTTPResponse;
+begin
+  LClient := THTTPClient.Create;
+  try
+    THorse.OnError(CustomErrorHandler);
+    LResponse := LClient.Get('http://localhost:9000/Api/Exception/Horse');
+    Assert.AreEqual(400, LResponse.StatusCode);
+    Assert.AreEqual('Simulated Horse Error', LResponse.ContentAsString);
+  finally
+    THorse.OnError(nil);
     LClient.Free;
   end;
 end;

@@ -22,7 +22,8 @@ uses
 {$ENDIF}
   Horse.Core.Param,
   Horse.Session,
-  Horse.Commons;
+  Horse.Commons,
+  Horse.Core.Context;
 
 type
   THorseRequest = class
@@ -40,6 +41,7 @@ type
     FSessions: THorseSessions;
     FArena: THorseArenaAllocator;
     FOwnsArena: Boolean;
+    FServices: THorseRequestContext;
 { ===========================================================================
   PATCH-REQ-3  CrossSocket shadow fields (populated by Populate, nil by default)
   =========================================================================== }
@@ -91,6 +93,7 @@ type
     function IsMultipartForm: Boolean;
     function IsFormURLEncoded: Boolean;
     function CanLoadContentFields: Boolean;
+    function GetServices: THorseRequestContext;
   public
     function Body: string; overload; virtual;
     function Body<T: class>: T; overload;
@@ -119,6 +122,8 @@ type
 { =========================================================================== }
     function ContentType: string; virtual;
     function Host: string; virtual;
+    function IsWebSocket: Boolean; virtual;
+    function WebSocketKey: string; virtual;
     property Arena: THorseArenaAllocator read GetArena write FArena;
     function PathInfo: string; virtual;
     function RawWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF}; virtual;
@@ -212,6 +217,7 @@ type
 { =========================================================================== }
     property MatchedRoute: string read FMatchedRoute write FMatchedRoute;
     property State: TObjectDictionary<string, TObject> read FState;
+    property Services: THorseRequestContext read GetServices;
     destructor Destroy; override;
   end;
 
@@ -283,6 +289,13 @@ begin
   if not Assigned(FCookie) then
     InitializeCookie;
   Result := FCookie;
+end;
+
+function THorseRequest.GetServices: THorseRequestContext;
+begin
+  if not Assigned(FServices) then
+    FServices := THorseRequestContext.Create;
+  Result := FServices;
 end;
 
 constructor THorseRequest.Create(const AWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF});
@@ -379,6 +392,8 @@ begin
   FMatchedRoute := '';
   if Assigned(FState) then
     FState.Clear;
+  if Assigned(FServices) then
+    FreeAndNil(FServices);
 end;
 { =========================================================================== }
 
@@ -408,6 +423,8 @@ begin
 { end PATCH-REQ-8 }
   if FOwnsArena and Assigned(FArena) then
     FreeAndNil(FArena);
+  if Assigned(FServices) then
+    FreeAndNil(FServices);
   if Assigned(FState) then
     FreeAndNil(FState);
   inherited;
@@ -942,6 +959,19 @@ end;
 procedure THorseRequest.SetBodyString(const AValue: string);
 begin
   FBodyString := AValue;
+end;
+{ =========================================================================== }
+
+function THorseRequest.IsWebSocket: Boolean;
+begin
+  Result := Headers.ContainsKey('upgrade') and (Pos('websocket', LowerCase(Headers['upgrade'])) > 0);
+end;
+
+function THorseRequest.WebSocketKey: string;
+begin
+  Result := '';
+  if Headers.ContainsKey('sec-websocket-key') then
+    Result := Headers['sec-websocket-key'];
 end;
 { =========================================================================== }
 

@@ -23,9 +23,8 @@ uses
   Horse.Commons;
 
 type
-  THorseCallbackProc = procedure(AReq: THorseRequest; ARes: THorseResponse; ANext: TNextProc);
-
 {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+  THorseCallbackProc = procedure(AReq: THorseRequest; ARes: THorseResponse; ANext: TNextProc);
   THorseCallbackRequest = procedure(AReq: THorseRequest);
   THorseCallbackResponse = procedure(ARes: THorseResponse);
   THorseCallbackRequestResponse = procedure(AReq: THorseRequest; ARes: THorseResponse);

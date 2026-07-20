@@ -87,6 +87,19 @@ These are not maintained by HashLoad but are listed here because they're commonl
 | [dliocode/horse-datalogger](https://github.com/dliocode/horse-datalogger) | Structured data logger | ✔️ | ❌ |
 | [weslleycapelari/horse-documentation](https://github.com/weslleycapelari/horse-documentation) | Auto-generated API docs | ✔️ | ❌ |
 | [weslleycapelari/horse-validator](https://github.com/weslleycapelari/horse-validator) | Request payload validation | ✔️ | ❌ |
+| [regyssilveira/horse-rate-limit](https://github.com/regyssilveira/horse-rate-limit) | Rate limiting control with support for multiple backends and storages | ✔️ | ✔️ |
+| [regyssilveira/horse-compression-v2](https://github.com/regyssilveira/horse-compression-v2) | High-performance response compression with Gzip, Deflate, and Brotli support | ✔️ | ✔️ |
+| [regyssilveira/horse-static](https://github.com/regyssilveira/horse-static) | High-performance static file serving with Range, Cache, and SPA Fallback support | ✔️ | ✔️ |
+| [regyssilveira/horse-dto](https://github.com/regyssilveira/horse-dto) | Auto-binding and declarative validation middleware | ✔️ | ✔️ |
+| [regyssilveira/horse-rbac](https://github.com/regyssilveira/horse-rbac) | Role-Based Access Control (RBAC) and scopes middleware | ✔️ | ✔️ |
+| [regyssilveira/horse-schema-validation](https://github.com/regyssilveira/horse-schema-validation) | Request payload schema validation middleware | ✔️ | ✔️ |
+| [regyssilveira/horse-multipart](https://github.com/regyssilveira/horse-multipart) | Multipart/form-data request body parser middleware | ✔️ | ✔️ |
+| [regyssilveira/horse-helmet](https://github.com/regyssilveira/horse-helmet) | Security headers middleware for HTTP response protection | ✔️ | ✔️ |
+| [regyssilveira/horse-ssl-redirect](https://github.com/regyssilveira/horse-ssl-redirect) | Redirection of insecure HTTP requests to HTTPS with proxy and localhost bypass support | ✔️ | ✔️ |
+| [regyssilveira/horse-crud](https://github.com/regyssilveira/horse-crud) | Automatic and dynamic CRUD routes generation middleware for Horse framework from decorated entities | ✔️ | ✔️ |
+| [regyssilveira/horse-request-id](https://github.com/regyssilveira/horse-request-id) | Request ID (Correlation ID) generation and tracking middleware for the Horse framework ecosystem | ✔️ | ✔️ |
+| [regyssilveira/horse-sanitize](https://github.com/regyssilveira/horse-sanitize) | Middleware to sanitize request parameters from the Horse ecosystem against XSS and harmful injections | ✔️ | ✔️ |
+
 
 ---
 

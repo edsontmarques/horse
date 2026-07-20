@@ -93,6 +93,26 @@ THorse.Group
   .Post('/audit', WriteAudit);
 ```
 
+## Middlewares por Rota (Locais)
+
+Você pode passar uma cadeia de middlewares específicos para uma única rota em formato de array (`array of THorseCallback`):
+
+```delphi
+// Sintaxe Estática com array de middlewares
+THorse.Get('/admin/dashboard', [MiddlewareAutenticacao, MiddlewareLogAcesso],
+  procedure(Req: THorseRequest; Res: THorseResponse)
+  begin
+    Res.Send('Painel Administrativo');
+  end);
+
+// Sintaxe Fluente de Rota com array de middlewares
+THorse.Route('/relatorios')
+  .Get([MiddlewareAutenticacao, MiddlewareLogAcesso], GetRelatorioHandler)
+  .Post([MiddlewareAutenticacao], PostRelatorioHandler);
+```
+
+Os middlewares de rota são executados após os middlewares globais e após os middlewares do grupo da rota, mas antes do callback final (handler) da rota.
+
 ## Middleware wildcard
 
 `THorse.Use(...)` registra middleware que roda em toda requisição, independentemente do caminho:
@@ -184,6 +204,50 @@ begin
   THorse.Listen(9000);
 end.
 ```
+
+## Roteamento Avançado (Parâmetros Opcionais e Regex)
+
+A partir da versão atual, o Horse suporta nativamente restrições de rotas baseadas em Expressões Regulares e parâmetros opcionais de caminho de URL em todos os roteadores (`THorseRouterTree` e `THorseRadixRouter`).
+
+### 1. Parâmetros Opcionais
+Ao adicionar um ponto de interrogação `?` ao final de um parâmetro de caminho (ex: `:id?`), você sinaliza ao Horse que esse parâmetro pode estar ausente na URL requisitada:
+
+```delphi
+THorse.Get('/users/:id?',
+  procedure(Req: THorseRequest; Res: THorseResponse)
+  begin
+    if Req.Params.Items['id'].IsEmpty then
+      Res.Send('Retornando todos os usuarios')
+    else
+      Res.Send('Retornando o usuario ' + Req.Params.Items['id']);
+  end);
+```
+
+* Requisitar `GET /users/123` -> Match! Retorna `Retornando o usuario 123` (`Req.Params.Items['id'] = '123'`)
+* Requisitar `GET /users` -> Match! Retorna `Retornando todos os usuarios` (`Req.Params.Items['id'] = ''`)
+
+### 2. Restrições com Expressões Regulares (Regex)
+Você pode restringir a correspondência de um parâmetro passando um padrão Regex entre parênteses logo após o nome do parâmetro:
+
+```delphi
+// Esta rota so sera acionada se o parametro 'id' contiver apenas numeros decimais
+THorse.Get('/users/:id(\d+)',
+  procedure(Req: THorseRequest; Res: THorseResponse)
+  begin
+    Res.Send('Usuario numerico: ' + Req.Params.Items['id']);
+  end);
+```
+
+* Requisitar `GET /users/456` -> Match! Retorna `Usuario numerico: 456`
+* Requisitar `GET /users/john` -> Não coincide com a Regex (continua a busca por outras rotas parametrizadas compatíveis ou retorna `404 Not Found`).
+
+### 3. Coexistência e Ambiguidade de Rotas
+O mecanismo de roteamento resolve a ambiguidade de rotas dando precedência da seguinte forma (da mais específica para a mais genérica):
+1. **Rota Estática Exata:** ex: `GET /users/new`
+2. **Rota Paramétrica com Regex:** ex: `GET /users/:id(\d+)`
+3. **Rota Paramétrica Opcional/Texto Geral:** ex: `GET /users/:id?`
+
+---
 
 ## Veja também
 

@@ -83,12 +83,14 @@ type
   protected
     function  GetStringVariable(Index: Integer): TWebString; override;
     function  GetDateVariable(Index: Integer): TDateTime; override;
-{$IF CompilerVersion >= 32.0}  // Delphi 10.2 Tokyo+
+{$IF CompilerVersion >= 34.0}  // Delphi 10.4 Sydney+
     function  GetIntegerVariable(Index: Integer): Int64; override;
 {$ELSE}
     function  GetIntegerVariable(Index: Integer): Integer; override;
 {$IFEND}
+{$IF CompilerVersion >= 32.0}
     function  GetRawContent: TBytes; override;
+{$IFEND}
   public
     constructor Create(const ARawReq: IHorseRawRequest); reintroduce;
     destructor  Destroy; override;
@@ -109,12 +111,14 @@ type
   TInterfacedWebResponse = class(TWebResponse)
   private
     FRawRes: IHorseRawResponse;
+    FContent: TWebString;
+    FContentStream: TStream;
   protected
     function  GetStringVariable(Index: Integer): TWebString; override;
     procedure SetStringVariable(Index: Integer; const Value: TWebString); override;
     function  GetDateVariable(Index: Integer): TDateTime; override;
     procedure SetDateVariable(Index: Integer; const Value: TDateTime); override;
-{$IF CompilerVersion >= 32.0}  // Delphi 10.2 Tokyo+
+{$IF CompilerVersion >= 34.0}  // Delphi 10.4 Sydney+
     function  GetIntegerVariable(Index: Integer): Int64; override;
     procedure SetIntegerVariable(Index: Integer; Value: Int64); override;
 {$ELSE}
@@ -134,6 +138,7 @@ type
     procedure SendResponse; override;
     procedure SendRedirect(const URI: TWebString); override;
     property  RawRes: IHorseRawResponse read FRawRes;
+    property  ContentStream: TStream read FContentStream write FContentStream;
   end;
 
 {$ENDIF}
@@ -252,7 +257,7 @@ begin
   Result := 0;
 end;
 
-{$IF CompilerVersion >= 32.0}
+{$IF CompilerVersion >= 34.0}
 function TInterfacedWebRequest.GetIntegerVariable(Index: Integer): Int64;
 {$ELSE}
 function TInterfacedWebRequest.GetIntegerVariable(Index: Integer): Integer;
@@ -267,6 +272,7 @@ begin
   end;
 end;
 
+{$IF CompilerVersion >= 32.0}
 function TInterfacedWebRequest.GetRawContent: TBytes;
 var
   LContent: string;
@@ -282,6 +288,7 @@ begin
   else
     Result := nil;
 end;
+{$IFEND}
 
 function TInterfacedWebRequest.GetFieldByName(const Name: TWebString): TWebString;
 begin
@@ -346,6 +353,8 @@ end;
 destructor TInterfacedWebResponse.Destroy;
 begin
   FRawRes := nil;
+  if Assigned(FContentStream) then
+    FContentStream.Free;
   inherited;
 end;
 
@@ -369,7 +378,7 @@ begin
   { Stub }
 end;
 
-{$IF CompilerVersion >= 32.0}
+{$IF CompilerVersion >= 34.0}
 function TInterfacedWebResponse.GetIntegerVariable(Index: Integer): Int64;
 {$ELSE}
 function TInterfacedWebResponse.GetIntegerVariable(Index: Integer): Integer;
@@ -378,7 +387,7 @@ begin
   Result := 0;
 end;
 
-{$IF CompilerVersion >= 32.0}
+{$IF CompilerVersion >= 34.0}
 procedure TInterfacedWebResponse.SetIntegerVariable(Index: Integer; Value: Int64);
 {$ELSE}
 procedure TInterfacedWebResponse.SetIntegerVariable(Index: Integer; Value: Integer);
@@ -389,17 +398,17 @@ end;
 
 function TInterfacedWebResponse.GetContent: TWebString;
 begin
-  Result := '';
+  Result := FContent;
 end;
 
 procedure TInterfacedWebResponse.SetContent(const Value: TWebString);
 begin
-  { Stub — use THorseResponse.Send }
+  FContent := Value;
 end;
 
 procedure TInterfacedWebResponse.SetContentStream(Value: TStream);
 begin
-  { Stub — use THorseResponse.SendFile }
+  FContentStream := Value;
 end;
 
 function TInterfacedWebResponse.GetStatusCode: Integer;
@@ -443,6 +452,9 @@ end;
 { --------------------------------------------------------------------------- }
 
 constructor TInterfacedWebRequest.Create(const ARawReq: IHorseRawRequest);
+var
+  LHeaders: TStringList;
+  I: Integer;
 begin
   FRawReq := ARawReq;
   inherited Create;
@@ -470,6 +482,22 @@ begin
     FRawReq.PopulateCookieFields(CookieFields);
     Content         := FRawReq.GetContent;
     ContentLength   := FRawReq.GetContentLength;
+
+    { ALL request headers → TRequest header storage, so GetFieldByName also
+      resolves non-standard headers (e.g. X-Test-Header).  SetFieldByName
+      routes known headers to their typed fields and everything else to
+      CustomHeaders; re-setting the fields assigned above is harmless (same
+      source values). }
+    LHeaders := TStringList.Create;
+    try
+      LHeaders.NameValueSeparator := '=';
+      FRawReq.PopulateHeaders(LHeaders);
+      for I := 0 to LHeaders.Count - 1 do
+        if LHeaders.Names[I] <> '' then
+          SetFieldByName(LHeaders.Names[I], LHeaders.ValueFromIndex[I]);
+    finally
+      LHeaders.Free;
+    end;
   end;
 end;
 

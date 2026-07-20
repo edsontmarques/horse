@@ -81,9 +81,54 @@ uses
 {$ENDIF}
   Horse.Utils,
   Horse.Exception,
-  Horse.Exception.Interrupted;
+  Horse.Exception.Interrupted,
+  Horse;
 
 
+
+{$IF DEFINED(FPC)}
+threadvar
+  GCurrentNextCaller: Pointer;
+
+procedure NextCallerDoPreValidation;
+var
+  LCallback: TList<THorseCallback>;
+  LNextCaller: TNextCaller;
+begin
+  LNextCaller := TNextCaller(GCurrentNextCaller);
+  try
+    LNextCaller.FFound^ := True;
+    if LNextCaller.FCallBack.TryGetValue(LNextCaller.FHTTPType, LCallback) then
+    begin
+      {$IF DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+      LCallback.Items[LNextCaller.FIndexCallback](LNextCaller.FRequest, LNextCaller.FResponse, LNextCaller.Next);
+      {$ELSE}
+      THorseCallbackProc(LCallback.Items[LNextCaller.FIndexCallback])(LNextCaller.FRequest, LNextCaller.FResponse, LNextCaller.Next);
+      {$ENDIF}
+    end;
+  except
+    on E: Exception do
+    begin
+      if E is EHorseCallbackInterrupted then
+        raise;
+      if E is EHorseException then
+      begin
+        LNextCaller.FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
+        Exit;
+      end;
+      if THorse.HasOnError then
+      begin
+        THorse.ExecuteOnError(LNextCaller.FRequest, LNextCaller.FResponse, E);
+        Exit;
+      end;
+      if LNextCaller.FResponse.Status < Integer(THTTPStatus.BadRequest) then
+        LNextCaller.FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
+      Exit;
+    end;
+  end;
+  LNextCaller.Next;
+end;
+{$ENDIF}
 
 procedure TNextCaller.Configure(
   {$IF DEFINED(FPC)}
@@ -138,9 +183,9 @@ begin
   end;
   FIndex := -1;
   FIndexCallback := -1;
-  if FIsParamsKey and (LCurrentStr <> '') then
+  if FIsParamsKey then
   begin
-      FRequest.Params.Dictionary.AddOrSetValue(FTag, DecodeParam(LCurrentStr));
+    FRequest.Params.Dictionary.AddOrSetValue(FTag, DecodeParam(LCurrentStr));
   end;
 end;
 
@@ -191,54 +236,104 @@ begin
       {$ENDIF}
       if (LCallbackCount > FIndexCallback) then
       begin
-        try
-          FFound^ := True;
-          {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
-          THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
-          {$ELSEIF DEFINED(FPC)}
-          LCallback.Items[FIndexCallback](FRequest, FResponse, Next);
+        if FIndexCallback = 0 then
+        begin
+          {$IF DEFINED(FPC)}
+          // FPC (com ou sem funcref): usa procedure global + threadvar para evitar
+          // o Internal Error 2022110601 do FPC ao capturar closures aninhadas.
+          GCurrentNextCaller := Self;
+          THorse.ExecutePreValidation(FRequest, FResponse, NextCallerDoPreValidation);
           {$ELSE}
-          LCallback[FIndexCallback](FRequest, FResponse, Next);
-          {$ENDIF}
-        except
-          on E: Exception do
-          begin
-            if E is EHorseCallbackInterrupted then
-              raise;
-            if E is EHorseException then
+          THorse.ExecutePreValidation(FRequest, FResponse,
+            procedure
             begin
-              FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
+              try
+                FFound^ := True;
+                LCallback[FIndexCallback](FRequest, FResponse, Next);
+              except
+                on E: Exception do
+                begin
+                  if E is EHorseCallbackInterrupted then
+                    raise;
+                  if E is EHorseException then
+                  begin
+                    FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
+                    Exit;
+                  end;
+                  if THorse.HasOnError then
+                  begin
+                    THorse.ExecuteOnError(FRequest, FResponse, E);
+                    Exit;
+                  end;
+                  if FResponse.Status < Integer(THTTPStatus.BadRequest) then
+                    FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
+                  Exit;
+                end;
+              end;
+              Next;
+            end);
+          {$ENDIF}
+        end
+        else
+        begin
+          try
+            FFound^ := True;
+            {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+            THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
+            {$ELSEIF DEFINED(FPC)}
+            LCallback.Items[FIndexCallback](FRequest, FResponse, Next);
+            {$ELSE}
+            LCallback[FIndexCallback](FRequest, FResponse, Next);
+            {$ENDIF}
+          except
+            on E: Exception do
+            begin
+              if E is EHorseCallbackInterrupted then
+                raise;
+              if E is EHorseException then
+              begin
+                FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
+                Exit;
+              end;
+              if THorse.HasOnError then
+              begin
+                THorse.ExecuteOnError(FRequest, FResponse, E);
+                Exit;
+              end;
+              if FResponse.Status < Integer(THTTPStatus.BadRequest) then
+                FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
               Exit;
             end;
-            if FResponse.Status < Integer(THTTPStatus.BadRequest) then
-              FResponse.Send('Internal Application Error').Status(THTTPStatus.InternalServerError);
-            Exit;
           end;
+          Next;
         end;
-        Next;
       end;
     end
     else
     begin
-      if FCallBack.Count > 0 then
+      FFound^ := FCallNextPath(FSegments, FIndexSegment, FHTTPType, FRequest, FResponse);
+      if not FFound^ then
       begin
-        FFound^ := True;
-        LAllow := '';
-        for LKey in FCallBack.Keys do
+        if FCallBack.Count > 0 then
         begin
-          if LKey <> TMethodType.mtAny then
+          FFound^ := True;
+          LAllow := '';
+          for LKey in FCallBack.Keys do
           begin
-            if LAllow <> '' then
-              LAllow := LAllow + ', ';
-            LAllow := LAllow + UpperCase(LKey.ToString);
+            if LKey <> TMethodType.mtAny then
+            begin
+              if LAllow <> '' then
+                LAllow := LAllow + ', ';
+              LAllow := LAllow + UpperCase(LKey.ToString);
+            end;
           end;
-        end;
-        if LAllow <> '' then
-          FResponse.AddHeader('Allow', LAllow);
-        FResponse.Send('Method Not Allowed').Status(THTTPStatus.MethodNotAllowed);
-      end
-      else
-        FResponse.Send('Not Found').Status(THTTPStatus.NotFound);
+          if LAllow <> '' then
+            FResponse.AddHeader('Allow', LAllow);
+          FResponse.Send('Method Not Allowed').Status(THTTPStatus.MethodNotAllowed);
+        end
+        else
+          FResponse.Send('Not Found').Status(THTTPStatus.NotFound);
+      end;
     end;
   end
   else

@@ -17,7 +17,7 @@ uses
     System.Generics.Collections,
   {$ENDIF}
   Horse.Commons, Horse.Callback, Horse.Request, Horse.Response,
-  Horse.Core.Router.Contract;
+  Horse.Core.Router.Contract, Horse.Core.Regex;
 
 type
   { Contexto de fluxo plano de execução de middlewares e rotas }
@@ -40,6 +40,10 @@ type
     Part: string;
     IsParam: Boolean;
     ParamName: string;
+    IsOptional: Boolean;
+    IsRegex: Boolean;
+    RegexPattern: string;
+    RegexMatcher: THorseRegex;
     FullPath: string;
     Children: TObjectList<TRadixNode>;
     Callbacks: TDictionary<TMethodType, TArray<THorseCallback>>;
@@ -97,9 +101,9 @@ uses
   {$IF DEFINED(FPC)}
   Classes,
   {$ELSE}
-  System.SysUtils, System.Classes,
+  System.SysUtils, System.Classes, System.Diagnostics,
   {$ENDIF}
-  Horse.Exception, Horse.Exception.Interrupted, Horse.Proc, Horse.Utils;
+  Horse.Exception, Horse.Exception.Interrupted, Horse.Proc, Horse.Utils, Horse, Horse.Core;
 
 {$IFDEF FPC}
 function StringToBytes(const AStr: string): TBytes;
@@ -123,6 +127,195 @@ begin
   Res.Send('Not Found').Status(THTTPStatus.NotFound);
 end;
 
+
+
+{$IFDEF FPC}
+threadvar
+  GCurrentExecutor: Pointer;
+  GCurrentNext: TNextProc;
+
+type
+  TRadixExecutor = class
+  private
+    FRouter: THorseRadixRouter;
+    FRequest: THorseRequest;
+    FResponse: THorseResponse;
+    FResult: Boolean;
+    procedure DoExecuteRoute;
+    procedure DoPreValidation(Req: THorseRequest; Res: THorseResponse; Next: TNextProc);
+  public
+    constructor Create(ARouter: THorseRadixRouter; AReq: THorseRequest; ARes: THorseResponse);
+    function Run: Boolean;
+  end;
+
+procedure RadixExecutorDoExecuteRoute;
+begin
+  TRadixExecutor(GCurrentExecutor).DoExecuteRoute;
+end;
+
+procedure RadixExecutorDoPreParsing;
+begin
+  THorse.ExecutePreParsing(TRadixExecutor(GCurrentExecutor).FRequest, TRadixExecutor(GCurrentExecutor).FResponse, RadixExecutorDoExecuteRoute);
+end;
+
+procedure RadixExecutorDoNext;
+begin
+  GCurrentNext();
+end;
+
+constructor TRadixExecutor.Create(ARouter: THorseRadixRouter; AReq: THorseRequest; ARes: THorseResponse);
+begin
+  FRouter := ARouter;
+  FRequest := AReq;
+  FResponse := ARes;
+  FResult := False;
+end;
+
+function TRadixExecutor.Run: Boolean;
+var
+  LStopwatch: TStopwatch;
+begin
+  LStopwatch := TStopwatch.StartNew;
+  FResponse.Request := FRequest;
+  GCurrentExecutor := Self;
+  try
+    try
+      THorse.ExecuteOnRequest(FRequest, FResponse, RadixExecutorDoPreParsing);
+      Result := FResult;
+    except
+      on E: Exception do
+      begin
+        Result := False;
+        raise;
+      end;
+    end;
+  finally
+    LStopwatch.Stop;
+    THorseCore.ExecuteOnTelemetry(FRequest, FResponse, LStopwatch.Elapsed.TotalMilliseconds);
+    THorse.ExecuteOnResponse(FRequest, FResponse);
+  end;
+end;
+
+procedure TRadixExecutor.DoExecuteRoute;
+var
+  LSegments: TArray<THorseBufferSlice>;
+  LNode: TRadixNode;
+  LMiddlewares: TList<THorseCallback>;
+  LParams: TDictionary<string, string>;
+  LCallbacksList: TList<THorseCallback>;
+  LRouteCallbacks: TArray<THorseCallback>;
+  LFlow: TRadixFlow;
+  LStartSegmentIndex: Integer;
+  LKeys: TArray<string>;
+  I: Integer;
+  LKey: TMethodType;
+  LAllow: string;
+  LMethodType: TMethodType;
+  LRawWebRequest: TRequest;
+begin
+  LRawWebRequest := FRequest.RawWebRequest;
+  if not Assigned(LRawWebRequest) then
+    LMethodType := FRequest.MethodType
+  else
+    LMethodType := TMethodType.FromString(LRawWebRequest.Method);
+
+  LSegments := FRequest.GetPathSegments;
+  
+  LStartSegmentIndex := 0;
+  if (Length(LSegments) > 0) and LSegments[0].Compare('', True) then
+    LStartSegmentIndex := 1;
+
+  LMiddlewares := TList<THorseCallback>.Create;
+  LParams := nil;
+  try
+    LNode := FRouter.FindNode(LSegments, LStartSegmentIndex, FRouter.FRoot, LMethodType, LMiddlewares, LParams);
+    
+    if LNode <> nil then
+    begin
+      FRequest.MatchedRoute := LNode.FullPath;
+      if LParams <> nil then
+      begin
+        LKeys := LParams.Keys.ToArray;
+        for I := 0 to Length(LKeys) - 1 do
+          FRequest.Params.Dictionary.AddOrSetValue(LKeys[I], DecodeParam(LParams.Items[LKeys[I]]));
+      end;
+
+      LCallbacksList := TList<THorseCallback>.Create;
+      try
+        LCallbacksList.AddRange(FRouter.FGlobalMiddlewares);
+        
+        LCallbacksList.Add(THorseCallback(DoPreValidation));
+
+        LCallbacksList.AddRange(LMiddlewares);
+        
+        if LNode.Callbacks.TryGetValue(LMethodType, LRouteCallbacks) or LNode.Callbacks.TryGetValue(mtAny, LRouteCallbacks) then
+        begin
+          LCallbacksList.AddRange(LRouteCallbacks);
+        end
+        else
+        begin
+          if LNode.Callbacks.Count > 0 then
+          begin
+            LAllow := '';
+            for LKey in LNode.Callbacks.Keys do
+            begin
+              if LKey <> TMethodType.mtAny then
+              begin
+                if LAllow <> '' then
+                  LAllow := LAllow + ', ';
+                LAllow := LAllow + UpperCase(LKey.ToString);
+              end;
+            end;
+            if LAllow <> '' then
+              FResponse.AddHeader('Allow', LAllow);
+            LCallbacksList.Add(@RadixMethodNotAllowedFinalizer);
+          end
+          else
+            LCallbacksList.Add(@RadixNotFoundFinalizer);
+        end;
+
+        LFlow := TRadixFlow.Create(LCallbacksList, FRequest, FResponse);
+        try
+          LFlow.Next;
+        finally
+          LFlow.Free;
+        end;
+      finally
+        LCallbacksList.Free;
+      end;
+      FResult := True;
+    end
+    else
+    begin
+      LCallbacksList := TList<THorseCallback>.Create;
+      try
+        LCallbacksList.AddRange(FRouter.FGlobalMiddlewares);
+        LCallbacksList.Add(@RadixNotFoundFinalizer);
+
+        LFlow := TRadixFlow.Create(LCallbacksList, FRequest, FResponse);
+        try
+          LFlow.Next;
+        finally
+          LFlow.Free;
+        end;
+      finally
+        LCallbacksList.Free;
+      end;
+      FResult := True;
+    end;
+  finally
+    LMiddlewares.Free;
+    if LParams <> nil then
+      LParams.Free;
+  end;
+end;
+
+procedure TRadixExecutor.DoPreValidation(Req: THorseRequest; Res: THorseResponse; Next: TNextProc);
+begin
+  GCurrentNext := Next;
+  THorse.ExecutePreValidation(Req, Res, RadixExecutorDoNext);
+end;
+{$ENDIF}
 
 
 { TRadixFlow }
@@ -154,8 +347,10 @@ begin
     LIndex := FIndex;
     Inc(FIndex);
     try
-      {$IF DEFINED(FPC)}
+      {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
       THorseCallbackProc(FCallbacks[LIndex])(FRequest, FResponse, Next);
+      {$ELSEIF DEFINED(FPC)}
+      FCallbacks[LIndex](FRequest, FResponse, Next);
       {$ELSE}
       FCallbacks[LIndex](FRequest, FResponse, Next);
       {$ENDIF}
@@ -170,8 +365,13 @@ begin
           FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
           Exit;
         end;
+        if THorse.HasOnError then
+        begin
+          THorse.ExecuteOnError(FRequest, FResponse, E);
+          Exit;
+        end;
         if FResponse.Status < Integer(THTTPStatus.BadRequest) then
-          FResponse.Send('Internal Application Error').Status(THTTPStatus.InternalServerError);
+          FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
         Exit;
       end;
     end;
@@ -181,16 +381,52 @@ end;
 { TRadixNode }
 
 constructor TRadixNode.Create(const APart: string);
+var
+  LPartClean: string;
+  LOpenParenthesis: Integer;
+  LCloseParenthesis: Integer;
 begin
   Part := APart;
-  IsParam := APart.StartsWith(':');
-  if IsParam then
-    ParamName := APart.Substring(1)
-  else
-    ParamName := '';
   Children := TObjectList<TRadixNode>.Create(True);
   Callbacks := TDictionary<TMethodType, TArray<THorseCallback>>.Create;
   Middlewares := TList<THorseCallback>.Create;
+
+  IsOptional := False;
+  IsRegex := False;
+  RegexPattern := '';
+  RegexMatcher := nil;
+
+  IsParam := APart.StartsWith(':');
+  if IsParam then
+  begin
+    LPartClean := APart.Substring(1);
+
+    if LPartClean.EndsWith('?') then
+    begin
+      IsOptional := True;
+      LPartClean := LPartClean.Substring(0, LPartClean.Length - 1);
+    end;
+
+    LOpenParenthesis := LPartClean.IndexOf('(');
+    if LOpenParenthesis >= 0 then
+    begin
+      LCloseParenthesis := LPartClean.IndexOf(')');
+      if LCloseParenthesis > LOpenParenthesis then
+      begin
+        IsRegex := True;
+        ParamName := LPartClean.Substring(0, LOpenParenthesis);
+        RegexPattern := LPartClean.Substring(LOpenParenthesis + 1, LCloseParenthesis - LOpenParenthesis - 1);
+        RegexMatcher := THorseRegex.Create(RegexPattern);
+      end;
+    end;
+
+    if not IsRegex then
+      ParamName := LPartClean;
+  end
+  else
+  begin
+    ParamName := '';
+  end;
 end;
 
 destructor TRadixNode.Destroy;
@@ -198,6 +434,8 @@ begin
   Children.Free;
   Callbacks.Free;
   Middlewares.Free;
+  if Assigned(RegexMatcher) then
+    RegexMatcher.Free;
   inherited;
 end;
 
@@ -452,7 +690,25 @@ begin
     AMiddlewares.AddRange(ANode.Middlewares);
 
   if AIndex >= Length(ASegments) then
+  begin
+    for LChild in ANode.Children do
+    begin
+      if LChild.IsParam and LChild.IsOptional then
+      begin
+        if AParams = nil then
+          AParams := TDictionary<string, string>.Create;
+        AParams.AddOrSetValue(LChild.ParamName, '');
+
+        LTempNode := LChild;
+        LBestMatch := FindNode(ASegments, AIndex, LTempNode, AHTTPType, AMiddlewares, AParams);
+        if (LBestMatch <> nil) and (LBestMatch.Callbacks.ContainsKey(AHTTPType) or LBestMatch.Callbacks.ContainsKey(mtAny)) then
+          Exit(LBestMatch)
+        else
+          AParams.Remove(LChild.ParamName);
+      end;
+    end;
     Exit(ANode);
+  end;
 
   LCurrentSlice := ASegments[AIndex];
 
@@ -473,13 +729,21 @@ begin
   begin
     if LChild.IsParam then
     begin
+      if LChild.IsRegex then
+      begin
+        if not LChild.RegexMatcher.Match(LCurrentSlice.ToString) then
+          Continue;
+      end;
+
       if AParams = nil then
         AParams := TDictionary<string, string>.Create;
       AParams.AddOrSetValue(LChild.ParamName, LCurrentSlice.ToString);
       LTempNode := LChild;
       LBestMatch := FindNode(ASegments, AIndex + 1, LTempNode, AHTTPType, AMiddlewares, AParams);
       if LBestMatch <> nil then
-        Exit(LBestMatch);
+        Exit(LBestMatch)
+      else
+        AParams.Remove(LChild.ParamName);
     end;
   end;
 
@@ -496,126 +760,186 @@ begin
 end;
 
 function THorseRadixRouter.Execute(const ARequest: THorseRequest; const AResponse: THorseResponse): Boolean;
+{$IF DEFINED(FPC)}
 var
-  LSegments: TArray<THorseBufferSlice>;
-  LMethodType: TMethodType;
-  LRawWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF};
-  LNode: TRadixNode;
-  LMiddlewares: TList<THorseCallback>;
-  LParams: TDictionary<string, string>;
-  LCallbacksList: TList<THorseCallback>;
-  LRouteCallbacks: TArray<THorseCallback>;
-  LFlow: TRadixFlow;
-  LStartSegmentIndex: Integer;
-  LKeys: TArray<string>;
-  I: Integer;
-  LKey: TMethodType;
-  LAllow: string;
+  LExecutor: TRadixExecutor;
 begin
+  LExecutor := TRadixExecutor.Create(Self, ARequest, AResponse);
   try
-    LRawWebRequest := ARequest.RawWebRequest;
-    if not Assigned(LRawWebRequest) then
-      LMethodType := ARequest.MethodType
-    else
-      LMethodType := TMethodType.FromString(LRawWebRequest.Method);
-
-    LSegments := ARequest.GetPathSegments;
-    
-    LStartSegmentIndex := 0;
-    if (Length(LSegments) > 0) and LSegments[0].Compare('', True) then
-      LStartSegmentIndex := 1;
-
-    LMiddlewares := TList<THorseCallback>.Create;
-    LParams := nil;
+    Result := LExecutor.Run;
+  finally
+    LExecutor.Free;
+  end;
+end;
+{$ELSE}
+var
+  LResult: Boolean;
+  LRoot: TRadixNode;
+  LGlobalMiddlewares: TList<THorseCallback>;
+  LStopwatch: TStopwatch;
+begin
+  LStopwatch := TStopwatch.StartNew;
+  LResult := False;
+  AResponse.Request := ARequest;
+  LRoot := FRoot;
+  LGlobalMiddlewares := FGlobalMiddlewares;
+  try
     try
-      LNode := FindNode(LSegments, LStartSegmentIndex, FRoot, LMethodType, LMiddlewares, LParams);
-      
-      if LNode <> nil then
-      begin
-        ARequest.MatchedRoute := LNode.FullPath;
-        if LParams <> nil then
+      THorse.ExecuteOnRequest(ARequest, AResponse,
+        procedure
         begin
-          LKeys := LParams.Keys.ToArray;
-          for I := 0 to Length(LKeys) - 1 do
-            ARequest.Params.Dictionary.AddOrSetValue(LKeys[I], DecodeParam(LParams.Items[LKeys[I]]));
-        end;
+          THorse.ExecutePreParsing(ARequest, AResponse,
+            procedure
+            var
+              LSegments: TArray<THorseBufferSlice>;
+              LNode: TRadixNode;
+              LMiddlewares: TList<THorseCallback>;
+              LParams: TDictionary<string, string>;
+              LCallbacksList: TList<THorseCallback>;
+              LRouteCallbacks: TArray<THorseCallback>;
+              LFlow: TRadixFlow;
+              LStartSegmentIndex: Integer;
+              LKeys: TArray<string>;
+              I: Integer;
+              LKey: TMethodType;
+              LAllow: string;
+              LMethodType: TMethodType;
+              LRawWebRequest: {$IF DEFINED(FPC)}TRequest{$ELSE}TWebRequest{$ENDIF};
+            begin
+              LRawWebRequest := ARequest.RawWebRequest;
+              if not Assigned(LRawWebRequest) then
+                LMethodType := ARequest.MethodType
+              else
+                LMethodType := TMethodType.FromString(LRawWebRequest.Method);
 
-        LCallbacksList := TList<THorseCallback>.Create;
-        try
-          LCallbacksList.AddRange(FGlobalMiddlewares);
-          LCallbacksList.AddRange(LMiddlewares);
-          
-          if LNode.Callbacks.TryGetValue(LMethodType, LRouteCallbacks) or LNode.Callbacks.TryGetValue(mtAny, LRouteCallbacks) then
+              LSegments := ARequest.GetPathSegments;
+              
+              LStartSegmentIndex := 0;
+              if (Length(LSegments) > 0) and LSegments[0].Compare('', True) then
+                LStartSegmentIndex := 1;
+
+              LMiddlewares := TList<THorseCallback>.Create;
+              LParams := nil;
+              try
+                LNode := FindNode(LSegments, LStartSegmentIndex, LRoot, LMethodType, LMiddlewares, LParams);
+                
+                if LNode <> nil then
+                begin
+                  ARequest.MatchedRoute := LNode.FullPath;
+                  if LParams <> nil then
+                  begin
+                    LKeys := LParams.Keys.ToArray;
+                    for I := 0 to Length(LKeys) - 1 do
+                      ARequest.Params.Dictionary.AddOrSetValue(LKeys[I], DecodeParam(LParams.Items[LKeys[I]]));
+                  end;
+
+                  LCallbacksList := TList<THorseCallback>.Create;
+                  try
+                    LCallbacksList.AddRange(LGlobalMiddlewares);
+                    
+                    // Injeção síncrona do gancho preValidation
+                    LCallbacksList.Add(
+                      procedure(Req: THorseRequest; Res: THorseResponse; Next: TProc)
+                      begin
+                        THorse.ExecutePreValidation(Req, Res, Next);
+                      end);
+
+                    LCallbacksList.AddRange(LMiddlewares);
+                    
+                    if LNode.Callbacks.TryGetValue(LMethodType, LRouteCallbacks) or LNode.Callbacks.TryGetValue(mtAny, LRouteCallbacks) then
+                    begin
+                      LCallbacksList.AddRange(LRouteCallbacks);
+                    end
+                    else
+                    begin
+                      if LNode.Callbacks.Count > 0 then
+                      begin
+                        LAllow := '';
+                        for LKey in LNode.Callbacks.Keys do
+                        begin
+                          if LKey <> TMethodType.mtAny then
+                          begin
+                            if LAllow <> '' then
+                              LAllow := LAllow + ', ';
+                            LAllow := LAllow + UpperCase(LKey.ToString);
+                          end;
+                        end;
+                        if LAllow <> '' then
+                          AResponse.AddHeader('Allow', LAllow);
+                        {$IF DEFINED(FPC)}LCallbacksList.Add(@RadixMethodNotAllowedFinalizer){$ELSE}LCallbacksList.Add(RadixMethodNotAllowedFinalizer){$ENDIF};
+                      end
+                      else
+                        {$IF DEFINED(FPC)}LCallbacksList.Add(@RadixNotFoundFinalizer){$ELSE}LCallbacksList.Add(RadixNotFoundFinalizer){$ENDIF};
+                    end;
+
+                    LFlow := TRadixFlow.Create(LCallbacksList, ARequest, AResponse);
+                    try
+                      LFlow.Next;
+                    finally
+                      LFlow.Free;
+                    end;
+                  finally
+                    LCallbacksList.Free;
+                  end;
+                  LResult := True;
+                end
+                else
+                begin
+                  LCallbacksList := TList<THorseCallback>.Create;
+                  try
+                    LCallbacksList.AddRange(LGlobalMiddlewares);
+                    {$IF DEFINED(FPC)}LCallbacksList.Add(@RadixNotFoundFinalizer){$ELSE}LCallbacksList.Add(RadixNotFoundFinalizer){$ENDIF};
+
+                    LFlow := TRadixFlow.Create(LCallbacksList, ARequest, AResponse);
+                    try
+                      LFlow.Next;
+                    finally
+                      LFlow.Free;
+                    end;
+                  finally
+                    LCallbacksList.Free;
+                  end;
+                  LResult := True;
+                end;
+              finally
+                LMiddlewares.Free;
+                if LParams <> nil then
+                  LParams.Free;
+              end;
+            end);
+        end);
+      Result := LResult;
+      AResponse.FlushCookiesToWebResponse;
+    except
+      on E: Exception do
+      begin
+        if THorse.HasOnError then
+        begin
+          if E is EHorseCallbackInterrupted then
           begin
-            LCallbacksList.AddRange(LRouteCallbacks);
+            Result := True;
           end
           else
           begin
-            if LNode.Callbacks.Count > 0 then
-            begin
-              LAllow := '';
-              for LKey in LNode.Callbacks.Keys do
-              begin
-                if LKey <> TMethodType.mtAny then
-                begin
-                  if LAllow <> '' then
-                    LAllow := LAllow + ', ';
-                  LAllow := LAllow + UpperCase(LKey.ToString);
-                end;
-              end;
-              if LAllow <> '' then
-                AResponse.AddHeader('Allow', LAllow);
-              {$IF DEFINED(FPC)}LCallbacksList.Add(@RadixMethodNotAllowedFinalizer){$ELSE}LCallbacksList.Add(RadixMethodNotAllowedFinalizer){$ENDIF};
-            end
-            else
-              {$IF DEFINED(FPC)}LCallbacksList.Add(@RadixNotFoundFinalizer){$ELSE}LCallbacksList.Add(RadixNotFoundFinalizer){$ENDIF};
+            THorse.ExecuteOnError(ARequest, AResponse, E);
+            Result := True;
           end;
-
-          LFlow := TRadixFlow.Create(LCallbacksList, ARequest, AResponse);
-          try
-            LFlow.Next;
-          finally
-            LFlow.Free;
-          end;
-        finally
-          LCallbacksList.Free;
+        end
+        else
+        begin
+          {$IF DEFINED(FPC)}
+          Writeln('CRITICAL RADIX ERROR: ', E.ClassName, ': ', E.Message); Flush(Output);
+          {$ENDIF}
+          raise;
         end;
-        Result := True;
-      end
-      else
-      begin
-        LCallbacksList := TList<THorseCallback>.Create;
-        try
-          LCallbacksList.AddRange(FGlobalMiddlewares);
-          {$IF DEFINED(FPC)}LCallbacksList.Add(@RadixNotFoundFinalizer){$ELSE}LCallbacksList.Add(RadixNotFoundFinalizer){$ENDIF};
-
-          LFlow := TRadixFlow.Create(LCallbacksList, ARequest, AResponse);
-          try
-            LFlow.Next;
-          finally
-            LFlow.Free;
-          end;
-        finally
-          LCallbacksList.Free;
-        end;
-        Result := True;
       end;
-    finally
-      LMiddlewares.Free;
-      if LParams <> nil then
-        LParams.Free;
     end;
-    
-    AResponse.FlushCookiesToWebResponse;
-  except
-    on E: Exception do
-    begin
-      {$IF DEFINED(FPC)}
-      Writeln('CRITICAL RADIX ERROR: ', E.ClassName, ': ', E.Message); Flush(Output);
-      {$ENDIF}
-      raise;
-    end;
+  finally
+    LStopwatch.Stop;
+    THorseCore.ExecuteOnTelemetry(ARequest, AResponse, LStopwatch.Elapsed.TotalMilliseconds);
+    THorse.ExecuteOnResponse(ARequest, AResponse);
   end;
 end;
+{$ENDIF}
 
 end.

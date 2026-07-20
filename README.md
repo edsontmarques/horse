@@ -70,14 +70,21 @@ The full guide lives in [`doc/`](./doc/index.md) — a small wiki that complemen
 | First server, install paths, Delphi/Lazarus setup | [Getting Started](./doc/getting-started.md) |
 | Defining routes, route params, route groups, query strings | [Routing](./doc/routing.md) |
 | `THorseRequest` / `THorseResponse` — body, headers, cookies, sessions, status, streaming | [Request & Response](./doc/request-response.md) |
+| Native bi-directional WebSocket connection support (RFC 6455) | [WebSockets](./doc/websocket.md) |
+| Native streaming (Web Streams / SSE) connection support | [Streaming](./doc/streaming.md) |
 | Using middleware, registration order, the `Next` proc | [Middleware](./doc/middleware.md) |
+| Request lifecycle hooks — onRequest, preParsing, preValidation, onSend, onResponse | [Lifecycle Hooks](./doc/lifecycle-hooks.md) |
+| Graceful Shutdown — draining active connections, telemetry ActiveRequests and flag IsShuttingDown | [Graceful Shutdown](./doc/graceful-shutdown.md) |
+| Multi-Instance — running and isolating multiple independent HTTP servers concurrently inside the same process | [Multi-Instance](./doc/multi-instance.md) |
+| Memory Buffer Pool — high-performance thread-safe buffer recycling to eliminate heap allocation | [Memory Buffer Pool](./doc/memory-buffer-pool.md) |
 | **Writing & publishing your own middleware** — skeleton, thread safety, Provider neutrality, Boss packaging | [**Writing a Middleware**](./doc/writing-middleware.md) |
-| **Choosing a transport provider** — Indy (default), CrossSocket, mORMot2, ICS, HttpSys, Apache, ISAPI, CGI, daemons | [**Providers**](./doc/providers.md) |
+| **Choosing a transport provider** — Indy (default), CrossSocket, mORMot2, ICS, HttpSys, gRPC, Apache, ISAPI, CGI, daemons | [**Providers**](./doc/providers.md) |
 | **Deploy** as Console / VCL / Daemon / Windows Service / LCL / HTTPApplication — one-page recipe | [**Deployment Cheatsheet**](./doc/deployment.md) |
 | Full middleware catalogue with extended descriptions | [Middleware Ecosystem](./doc/middleware-ecosystem.md) |
 | Observability, distributed tracing (OpenTelemetry) and metrics collection (Prometheus) | [Observability & Telemetry](./doc/telemetry.md) |
 | Automated integration, resilience (Access Violation) and SO limit testing | [Integrity Testing](./doc/integrity-testing.md) |
 | Supported Delphi / FPC versions and platforms | [Compiler Support](./doc/compiler-support.md) |
+| Long-term architecture roadmap and technical backlog | [Roadmap](./doc/roadmap/README.md) |
 
 ### 🤖 AI Coding Skills
 To help your AI agent (like Antigravity, GitHub Copilot, or Claude) understand and write idiomatic, thread-safe, and memory-safe Horse code, we provide pre-packaged instruction files in [`doc/skills/`](./doc/skills/README.md).
@@ -104,6 +111,7 @@ A _provider_ is the HTTP transport that owns the socket and hands requests to yo
 | **`fphttpserver`** _(FPC default for self-hosted)_                                              | _(none)_                | &nbsp;&nbsp;&nbsp;n/a | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[horse-provider-crosssocket](https://github.com/freitasjca/horse-provider-crosssocket)**    | `HORSE_CROSSSOCKET`     | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[horse-provider-mormot](https://github.com/freitasjca/horse-provider-mormot)**               | `HORSE_PROVIDER_MORMOT` | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+| 🆕 **[horse-provider-ics](https://github.com/freitasjca/horse-provider-ics)** _(Delphi; Win + Linux/macOS)_     | `HORSE_PROVIDER_ICS`    | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;❌ |
 | 🆕 **[HTTP.sys](./doc/httpsys.md)** _(Windows kernel-mode driver for ultra-low latency)_        | `HORSE_PROVIDER_HTTPSYS` | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[epoll](./doc/epoll.md)** _(Linux-native asynchronous event loop)_                         | `HORSE_PROVIDER_EPOLL`   | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[horse-provider-ics](https://github.com/freitasjca/horse-provider-ics)** _(Delphi; Win + Linux/macOS)_     | `HORSE_PROVIDER_ICS`    | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;❌ |
@@ -193,6 +201,19 @@ This is a list of middlewares that are created by the Horse community, please cr
 |  [dliocode/horse-datalogger](https://github.com/dliocode/horse-datalogger)                                 | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;❌ |
 |  [weslleycapelari/horse-documentation](https://github.com/weslleycapelari/horse-documentation)             | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;❌ |
 |  [weslleycapelari/horse-validator](https://github.com/weslleycapelari/horse-validator)                     | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;❌ |
+|  [regyssilveira/horse-rate-limit](https://github.com/regyssilveira/horse-rate-limit)                       | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-compression-v2](https://github.com/regyssilveira/horse-compression-v2)               | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-static](https://github.com/regyssilveira/horse-static)                               | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-dto](https://github.com/regyssilveira/horse-dto)                                     | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-rbac](https://github.com/regyssilveira/horse-rbac)                                   | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-schema-validation](https://github.com/regyssilveira/horse-schema-validation)         | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-multipart](https://github.com/regyssilveira/horse-multipart)                         | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-helmet](https://github.com/regyssilveira/horse-helmet)                               | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-ssl-redirect](https://github.com/regyssilveira/horse-ssl-redirect)                   | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-crud](https://github.com/regyssilveira/horse-crud)                                   | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-request-id](https://github.com/regyssilveira/horse-request-id)                       | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+|  [regyssilveira/horse-sanitize](https://github.com/regyssilveira/horse-sanitize)                           | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+
 
 ## 📊 Telemetry
 
@@ -203,6 +224,13 @@ These are middlewares focused on application observability, metrics, and tracing
 |  [marcobreveglieri/horse-prometheus-metrics](https://github.com/marcobreveglieri/horse-prometheus-metrics) | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;❌ |
 |  [regyssilveira/horse-opentelemetry](https://github.com/regyssilveira/horse-opentelemetry)                 | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 |  [regyssilveira/horse-prometheus](https://github.com/regyssilveira/horse-prometheus)                       | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+
+## 🤖 AI Agent Skills
+
+This repository includes native instructions and model skills designed to guide AI agents (such as Gemini, Claude, ChatGPT, and GitHub Copilot) during development.
+
+* **AI Guidelines:** See [.agents/AGENTS.md](./.agents/AGENTS.md) for core architectural rules on dependency injection, lifecycle hooks, concurrency, and telemetry.
+* **Agent Skills:** See [doc/skills/README.md](./doc/skills/README.md) for the complete directory of optimized AI skills and development guides.
 
 ## Delphi Versions
 

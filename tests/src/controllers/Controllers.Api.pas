@@ -16,6 +16,7 @@ procedure DoHeadApi(Req: THorseRequest; Res: THorseResponse; Next: TProc);
 implementation
 
 uses
+  System.SysUtils,
   System.JSON,
   Horse.Commons;
 
@@ -42,11 +43,38 @@ begin
   Next;
 end;
 
+procedure MiddlewareRouteStep1(Req: THorseRequest; Res: THorseResponse; Next: TProc);
+begin
+  Res.AddHeader('X-Route-Step1', 'true');
+  Next;
+end;
+
+procedure MiddlewareRouteStep2(Req: THorseRequest; Res: THorseResponse; Next: TProc);
+begin
+  Res.AddHeader('X-Route-Step2', 'true');
+  Next;
+end;
+
 procedure Registry;
 var
   LAuthMiddleware: THorseCallback;
 begin
   THorse.Use(MiddlewareCORS);
+
+  // Rota fluente com array de middlewares
+  THorse.Route('/Api/RouteMiddlewares')
+    .Get([MiddlewareRouteStep1, MiddlewareRouteStep2],
+      procedure(Req: THorseRequest; Res: THorseResponse)
+      begin
+        Res.Send('RouteMiddlewaresData');
+      end);
+
+  // Rota estática com array de middlewares
+  THorse.Get('/Api/StaticRouteMiddlewares', [MiddlewareRouteStep1, MiddlewareRouteStep2],
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      Res.Send('StaticRouteMiddlewaresData');
+    end);
 
   LAuthMiddleware := MiddlewareAuth;
 
@@ -67,6 +95,12 @@ begin
             Res.Send('CorsData');
           end);
 
+  THorse.Route('/Api/CustomHeader')
+    .Get(procedure(Req: THorseRequest; Res: THorseResponse; Next: TProc)
+         begin
+           Res.Send(Req.Headers['X-Custom-Header']);
+         end);
+
   THorse
     .Group
       .Prefix('/Api')
@@ -78,6 +112,18 @@ begin
           .Patch(DoPatchApi)
           .Head(DoHeadApi)
         .&End;
+
+  THorse.Get('/Api/Exception/Normal',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      raise Exception.Create('Simulated Normal Error');
+    end);
+
+  THorse.Get('/Api/Exception/Horse',
+    procedure(Req: THorseRequest; Res: THorseResponse)
+    begin
+      raise EHorseException.Create.Status(THTTPStatus.BadRequest).Error('Simulated Horse Error');
+    end);
 end;
 
 procedure DoGetApi(Req: THorseRequest; Res: THorseResponse; Next: TProc);
