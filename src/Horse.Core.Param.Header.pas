@@ -3,7 +3,7 @@ unit Horse.Core.Param.Header;
 {$IF DEFINED(FPC)}
 {$MODE DELPHI}{$H+}
 {$MACRO ON}
-{$IF FPC_FULLVERSION >= 30301}
+{$IF DEFINED(FPC) AND (FPC_FULLVERSION >= 30301)}
   // FPC 3.3.1+ (trunk) rtl-generics declares IEqualityComparer<T> with
   // Delphi-compatible const parameters on EVERY platform (not just Win64).
   // Upstream's guard only checks CPU64+WINDOWS, so on FPC-trunk Linux it
