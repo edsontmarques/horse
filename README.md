@@ -70,6 +70,8 @@ The full guide lives in [`doc/`](./doc/index.md) — a small wiki that complemen
 | First server, install paths, Delphi/Lazarus setup | [Getting Started](./doc/getting-started.md) |
 | Defining routes, route params, route groups, query strings | [Routing](./doc/routing.md) |
 | `THorseRequest` / `THorseResponse` — body, headers, cookies, sessions, status, streaming | [Request & Response](./doc/request-response.md) |
+| Native bi-directional WebSocket connection support (RFC 6455) | [WebSockets](./doc/websocket.md) |
+| Native streaming (Web Streams / SSE) connection support | [Streaming](./doc/streaming.md) |
 | Using middleware, registration order, the `Next` proc | [Middleware](./doc/middleware.md) |
 | Request lifecycle hooks — onRequest, preParsing, preValidation, onSend, onResponse | [Lifecycle Hooks](./doc/lifecycle-hooks.md) |
 | Graceful Shutdown — draining active connections, telemetry ActiveRequests and flag IsShuttingDown | [Graceful Shutdown](./doc/graceful-shutdown.md) |
@@ -109,6 +111,7 @@ A _provider_ is the HTTP transport that owns the socket and hands requests to yo
 | **`fphttpserver`** _(FPC default for self-hosted)_                                              | _(none)_                | &nbsp;&nbsp;&nbsp;n/a | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[horse-provider-crosssocket](https://github.com/freitasjca/horse-provider-crosssocket)**    | `HORSE_CROSSSOCKET`     | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[horse-provider-mormot](https://github.com/freitasjca/horse-provider-mormot)**               | `HORSE_PROVIDER_MORMOT` | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
+| 🆕 **[horse-provider-ics](https://github.com/freitasjca/horse-provider-ics)** _(Delphi; Win + Linux/macOS)_     | `HORSE_PROVIDER_ICS`    | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;❌ |
 | 🆕 **[HTTP.sys](./doc/httpsys.md)** _(Windows kernel-mode driver for ultra-low latency)_        | `HORSE_PROVIDER_HTTPSYS` | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[epoll](./doc/epoll.md)** _(Linux-native asynchronous event loop)_                         | `HORSE_PROVIDER_EPOLL`   | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[horse-provider-ics](https://github.com/freitasjca/horse-provider-ics)** _(Delphi; Win + Linux/macOS)_     | `HORSE_PROVIDER_ICS`    | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;❌ |
