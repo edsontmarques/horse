@@ -66,7 +66,10 @@ type
     FPort: Integer;
     FHost: string;
     FRunning: Boolean;
-    procedure EmptyNext;
+
+    {$IF DEFINED(FPC)}
+      procedure EmptyNext;
+    {$ENDIF}
 
     class function TrimPath(const APath: string): string; static;
     function RegisterRoute(const AHTTPType: TMethodType; const APath: string; const ACallback: THorseCallback): THorseInstance;
@@ -363,9 +366,12 @@ end;
 
 { THorseInstance }
 
+{$IF DEFINED(FPC)}
 procedure THorseInstance.EmptyNext;
 begin
+
 end;
+{$ENDIF}
 
 constructor THorseInstance.Create;
 begin
@@ -1452,7 +1458,11 @@ begin
   RegisterHorseInstance(APort, Self);
   FRunning := True;
   try
+    {$IF DEFINED(HORSE_ISAPI) OR DEFINED(HORSE_CGI) OR DEFINED(HORSE_APACHE)}
+    THorseProvider.Listen(ACallbackListen);
+    {$ELSE}
     THorseProvider.Listen(APort, AHost, ACallbackListen, ACallbackStopListen);
+    {$ENDIF}
   except
     FRunning := False;
     raise;

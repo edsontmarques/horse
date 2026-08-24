@@ -7,7 +7,12 @@ unit Horse.Provider.Indy.WebSocket;
 interface
 
 uses
-  SysUtils, Classes, IdContext, IdHTTPWebBrokerBridge, Web.HTTPApp, IdGlobal,
+  SysUtils,
+  Classes,
+  IdContext,
+  IdHTTPWebBrokerBridge,
+  Web.HTTPApp,
+  IdGlobal,
   Horse.Core.WebSocket;
 
 type
@@ -67,7 +72,7 @@ begin
   if not IsConnected then
     Exit;
   try
-    FContext.Connection.IOHandler.ReadBytes(LIdBytes, ACount, False);
+    FContext.Connection.IOHandler.ReadBytes(LIdBytes, -1, False);
     if Length(LIdBytes) > 0 then
     begin
       SetLength(ABuffer, Length(LIdBytes));
@@ -138,7 +143,6 @@ end;
 function TIndyWebSocketUpgrader.Upgrade(const APath: string; const AHeartbeatInterval: Integer): IHorseWebSocketConnection;
 var
   LAcceptKey: string;
-  LHandshakeResponse: string;
   LTransport: IHorseWebSocketTransport;
   LConnection: IHorseWebSocketConnection;
   LClientKey: string;
@@ -148,16 +152,29 @@ begin
   LClientKey := FWebRequest.GetFieldByName('Sec-WebSocket-Key');
   LAcceptKey := THorseWebSocketHandshake.CalculateAcceptKey(LClientKey);
 
-  LHandshakeResponse :=
-    'HTTP/1.1 101 Switching Protocols' + #13#10 +
-    'Upgrade: websocket' + #13#10 +
-    'Connection: Upgrade' + #13#10 +
-    'Sec-WebSocket-Accept: ' + LAcceptKey + #13#10#13#10;
-    
-  FContext.Connection.IOHandler.Write(LHandshakeResponse);
+  FContext.Connection.IOHandler.WriteLn('HTTP/1.1 101 Switching Protocols');
+  FContext.Connection.IOHandler.WriteLn('Upgrade: websocket');
+  FContext.Connection.IOHandler.WriteLn('Connection: Upgrade');
+  FContext.Connection.IOHandler.WriteLn('Sec-WebSocket-Accept: ' + LAcceptKey);
+  FContext.Connection.IOHandler.WriteLn('');
 
   LTransport := TIndyWebSocketTransport.Create(FContext);
   LConnection := THorseWebSocketConnection.Create(LTransport, APath, AHeartbeatInterval);
+
+  if Assigned(OnConnect) then
+  begin
+    try
+      OnConnect(LConnection);
+    except
+      on E: Exception do
+      begin
+        LConnection.TriggerError(E);
+        LConnection.Close(1011, 'Internal Error');
+        LConnection.TriggerDisconnect;
+        raise;
+      end;
+    end;
+  end;
 
   // Executa o loop bloqueante na thread atual do Indy, mantendo o socket aberto
   SetLength(LBuffer, 4096);

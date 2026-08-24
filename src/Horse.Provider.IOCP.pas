@@ -1,7 +1,7 @@
-unit Horse.Provider.IOCP;
+﻿unit Horse.Provider.IOCP;
 
 {$IF DEFINED(FPC)}
-{$MODE DELPHI}{$H+}
+  {$MODE DELPHI}{$H+}
 {$ENDIF}
 
 interface
@@ -9,19 +9,19 @@ interface
 {$IFDEF MSWINDOWS}
 uses
   {$IF DEFINED(FPC)}
-  SysUtils,
-  Classes,
-  Generics.Collections,
-  Windows,
-  WinSock2,
-  syncobjs,
+    SysUtils,
+    Classes,
+    Generics.Collections,
+    Windows,
+    WinSock2,
+    syncobjs,
   {$ELSE}
-  System.SysUtils,
-  System.Classes,
-  System.SyncObjs,
-  System.Generics.Collections,
-  Winapi.Windows,
-  Winapi.WinSock2,
+    System.SysUtils,
+    System.Classes,
+    System.SyncObjs,
+    System.Generics.Collections,
+    Winapi.Windows,
+    Winapi.WinSock2,
   {$ENDIF}
   Horse.Provider.Abstract,
   Horse.Provider.Config,
@@ -32,6 +32,7 @@ uses
   Horse.Commons,
   Horse.Proc,
   Horse.Exception.Interrupted,
+  Horse.Core,
   Horse.Core.WebSocket,
   Horse.Provider.Socket.WebSocket;
 
@@ -39,9 +40,9 @@ type
   TIocpConnectionContext = class;
 
   {$IF DEFINED(FPC)}
-  THorseProviderCallback = Horse.Proc.TProc;
+    THorseProviderCallback = Horse.Proc.TProc;
   {$ELSE}
-  THorseProviderCallback = System.SysUtils.TProc;
+    THorseProviderCallback = System.SysUtils.TProc;
   {$ENDIF}
 
   THeaderSegment = record
@@ -75,6 +76,7 @@ type
       out AContentLength: Int64;
       out AIsChunked: Boolean
     ): Boolean; static;
+
     { Fix G — Transfer-Encoding: chunked support. Returns False while the
       terminating zero-size chunk has not arrived yet (read more and retry).
       On True the chunk data has been compacted in place at ABodyOffset,
@@ -120,6 +122,7 @@ type
       const AClientIP: string;
       AClientPort: Integer
     );
+
     destructor Destroy; override;
 
     function GetMethod: string;
@@ -137,9 +140,9 @@ type
     function GetContentLength: Integer;
     {$ELSE}
       {$IF CompilerVersion >= 32.0}
-      function GetContentLength: Int64;
+        function GetContentLength: Int64;
       {$ELSE}
-      function GetContentLength: Integer;
+        function GetContentLength: Integer;
       {$ENDIF}
     {$ENDIF}
 
@@ -216,11 +219,32 @@ type
     Closed: Integer;
     RefCount: Integer;
     LastActive: Int64;
+    Accepted: Boolean;
     ClientIP: string;
     ClientPort: Integer;
 
     constructor Create(ASocket: TSocket);
     destructor Destroy; override;
+    procedure AddRef;
+    procedure Release;
+  end;
+
+  { Registro compartilhado por todos os workers que consomem o mesmo IOCP. }
+  TIocpConnectionRegistry = class
+  private
+    FConnections: TList<TIocpConnectionContext>;
+    FSync: TCriticalSection;
+    FPendingIO: Integer;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    procedure Add(AContext: TIocpConnectionContext);
+    procedure BeginIO(AContext: TIocpConnectionContext);
+    procedure EndIO(AContext: TIocpConnectionContext);
+    function HasPendingIO: Boolean;
+    procedure Close(AContext: TIocpConnectionContext);
+    procedure CloseAll;
+    procedure CollectExpired(AExpired: TList<TIocpConnectionContext>; const ANow: Int64);
   end;
 
   { Thread worker que consome o Completion Port do Windows }
@@ -229,8 +253,8 @@ type
     FListenSocket: TSocket;
     FIocpHandle: THandle;
     FRunning: Boolean;
-    FConnections: TList<TIocpConnectionContext>;
-    FConnectionsSync: TCriticalSection;
+    FRegistry: TIocpConnectionRegistry;
+    FChecksTimeouts: Boolean;
     procedure ProcessClientRead(AContext: TIocpConnectionContext; ABytesTransferred: DWORD);
     procedure ProcessClientWrite(AContext: TIocpConnectionContext; ABytesTransferred: DWORD);
     procedure CloseConnection(AContext: TIocpConnectionContext);
@@ -240,7 +264,8 @@ type
   protected
     procedure Execute; override;
   public
-    constructor Create(AListenSocket: TSocket; AIocpHandle: THandle);
+    constructor Create(AListenSocket: TSocket; AIocpHandle: THandle;
+      ARegistry: TIocpConnectionRegistry; AChecksTimeouts: Boolean);
     destructor Destroy; override;
     procedure TerminateWorker;
   end;
@@ -254,6 +279,7 @@ type
     class var FListenSocket: TSocket;
     class var FIocpHandle: THandle;
     class var FWorkers: TObjectList<THorseIocpWorker>;
+    class var FRegistry: TIocpConnectionRegistry;
 
     class procedure SetPort(const AValue: Integer); static;
     class procedure SetHost(const AValue: string); static;
@@ -278,6 +304,7 @@ type
     class procedure ListenWithConfig(const APort: Integer; const AConfig: THorseCrossSocketConfig); override;
     class function GetActivePort: Integer; override;
     class procedure StopListen; override;
+    class procedure StopListenGraceful(const ATimeoutMS: Integer = 5000); override;
     class function IsRunning: Boolean;
 
     class constructor CreateClass;
@@ -291,9 +318,10 @@ type
     Res: THorseResponse;
     RawRes: TIocpRawResponse;
     {$IFNDEF FPC}
-    WebRequest: TInterfacedWebRequest;
+      WebRequest: TInterfacedWebRequest;
     {$ENDIF}
   end;
+
   PWorkItemData = ^TWorkItemData;
 
   function QueueUserWorkItem(Func: Pointer; Context: Pointer; Flags: ULONG): BOOL; stdcall; external kernel32 name 'QueueUserWorkItem';
@@ -308,7 +336,7 @@ implementation
 
 {$IFNDEF FPC}
   {$IF CompilerVersion < 31.0}
-  function GetTickCount64: UInt64; stdcall; external 'kernel32.dll' name 'GetTickCount64';
+    function GetTickCount64: UInt64; stdcall; external 'kernel32.dll' name 'GetTickCount64';
   {$IFEND}
 {$ENDIF}
 
@@ -408,17 +436,21 @@ begin
     end;
   end;
 
-  if LHeaderEnd = -1 then Exit;
+  if LHeaderEnd = -1 then
+    Exit;
 
   // 1. Parse da Request Line
   LLineEnd := FindCRLF(ABuffer, 0, LHeaderEnd);
-  if LLineEnd = -1 then Exit;
+  if LLineEnd = -1 then
+    Exit;
 
   LSpace1 := FindByte(ABuffer, 0, LLineEnd, 32);
-  if LSpace1 = -1 then Exit;
+  if LSpace1 = -1 then
+    Exit;
 
   LSpace2 := FindByte(ABuffer, LSpace1 + 1, LLineEnd, 32);
-  if LSpace2 = -1 then Exit;
+  if LSpace2 = -1 then
+    Exit;
 
   LMethodLen := LSpace1;
   LPathLen := LSpace2 - LSpace1 - 1;
@@ -448,7 +480,8 @@ begin
   while LLineStart < LHeaderEnd do
   begin
     LLineEnd := FindCRLF(ABuffer, LLineStart, LHeaderEnd);
-    if LLineEnd = -1 then LLineEnd := LHeaderEnd;
+    if LLineEnd = -1 then
+      LLineEnd := LHeaderEnd;
 
     LColon := FindByte(ABuffer, LLineStart, LLineEnd, 58); // ':'
     if LColon <> -1 then
@@ -509,7 +542,8 @@ begin
   begin
     { chunk-size line: hex digits, optional ';extensions', terminated by CRLF }
     LLineEnd := FindCRLF(ABuffer, LSrc, ALength);
-    if LLineEnd = -1 then Exit;   { size line not complete yet }
+    if LLineEnd = -1 then
+      Exit;   { size line not complete yet }
 
     LChunkSize := 0;
     I := LSrc;
@@ -528,7 +562,10 @@ begin
       if LChunkSize > $7FFFFFFF then Exit;     { insane size — treat as incomplete }
       Inc(I);
     end;
-    if I = LSrc then Exit;        { no hex digit at all — malformed }
+
+    if I = LSrc then
+      Exit;        { no hex digit at all — malformed }
+
     LSrc := LLineEnd + 2;
 
     if LChunkSize = 0 then
@@ -565,7 +602,8 @@ begin
     No mutation happens, so an incomplete body can safely be re-scanned
     after the next read completion delivers more bytes. }
   Result := ScanChunkedBody(ABuffer, ALength, ABodyOffset, False, ADecodedLength);
-  if not Result then Exit;
+  if not Result then
+    Exit;
 
   { pass 2 — compact the chunk data in place over the chunk framing.
     LDst only ever trails LSrc, so the forward Move is safe. }
@@ -642,7 +680,8 @@ var
   LLowerName: string;
 begin
   LLowerName := LowerCase(AName);
-  if FResolvedHeaders.TryGetValue(LLowerName, Result) then Exit;
+  if FResolvedHeaders.TryGetValue(LLowerName, Result) then
+    Exit;
 
   for I := 0 to Length(FHeaders) - 1 do
   begin
@@ -798,7 +837,8 @@ begin
     Exit;
 
   LBody := GetContent;
-  if LBody = '' then Exit;
+  if LBody = '' then
+    Exit;
 
   LStart := 1;
   LLen := Length(LBody);
@@ -825,7 +865,8 @@ var
   LName, LValue, LPart: string;
 begin
   LCookies := GetFieldByName('Cookie');
-  if LCookies = '' then Exit;
+  if LCookies = '' then
+    Exit;
 
   LStart := 1;
   LLen := Length(LCookies);
@@ -964,6 +1005,7 @@ begin
     LBytesSent := 0;
     WSASend(FContext.Socket, @LBufs[0], LBufCount, LBytesSent, LFlags, nil, nil);
   end;
+
   FHeadersSent := True;
 end;
 
@@ -971,7 +1013,8 @@ procedure TIocpRawResponse.SendHeaders;
 var
   LHeaderBytes: TBytes;
 begin
-  if FHeadersSent then Exit;
+  if FHeadersSent then
+    Exit;
   LHeaderBytes := PrepareHeaders;
   if Length(LHeaderBytes) > 0 then
     send(FContext.Socket, LHeaderBytes[0], Length(LHeaderBytes), 0);
@@ -1006,7 +1049,8 @@ begin
   while True do
   begin
     LReadCount := AStream.Read(LChunkBuf[0], Length(LChunkBuf));
-    if LReadCount <= 0 then Break;
+    if LReadCount <= 0 then
+      Break;
     send(FContext.Socket, LChunkBuf[0], LReadCount, 0);
   end;
   FinalizeResponse;
@@ -1044,11 +1088,16 @@ begin
   { REPEATHDR-1 — borrow the ordered dup-preserving store for PrepareHeaders. }
   FRepeatHeaders := ARes.RepeatHeaders;
   
-  if FStatusCode = 200 then FStatusReason := 'OK'
-  else if FStatusCode = 204 then FStatusReason := 'No Content'
-  else if FStatusCode = 404 then FStatusReason := 'Not Found'
-  else if FStatusCode = 500 then FStatusReason := 'Internal Server Error'
-  else FStatusReason := 'HTTP Response';
+  if FStatusCode = 200 then
+    FStatusReason := 'OK'
+  else if FStatusCode = 204 then
+    FStatusReason := 'No Content'
+  else if FStatusCode = 404 then
+    FStatusReason := 'Not Found'
+  else if FStatusCode = 500 then
+    FStatusReason := 'Internal Server Error'
+  else
+    FStatusReason := 'HTTP Response';
 
   { REPEATHDR-1 — copy the shadow CustomHeaders into FHeaders, but SKIP
     Set-Cookie: the dict would collapse repeats, and every Set-Cookie is emitted
@@ -1150,6 +1199,7 @@ begin
   Closed := 0;
   RefCount := 1;
   LastActive := GetTickCount64;
+  Accepted := False;
 end;
 
 destructor TIocpConnectionContext.Destroy;
@@ -1160,6 +1210,149 @@ begin
     Socket := INVALID_SOCKET;
   end;
   inherited;
+end;
+
+procedure TIocpConnectionContext.AddRef;
+begin
+  InterlockedIncrement(RefCount);
+end;
+
+procedure TIocpConnectionContext.Release;
+begin
+  if InterlockedDecrement(RefCount) = 0 then
+    Free;
+end;
+
+{ TIocpConnectionRegistry }
+
+constructor TIocpConnectionRegistry.Create;
+begin
+  inherited Create;
+  FConnections := TList<TIocpConnectionContext>.Create;
+  FSync := TCriticalSection.Create;
+  FPendingIO := 0;
+end;
+
+procedure TIocpConnectionRegistry.BeginIO(AContext: TIocpConnectionContext);
+begin
+  AContext.AddRef;
+  InterlockedIncrement(FPendingIO);
+end;
+
+procedure TIocpConnectionRegistry.EndIO(AContext: TIocpConnectionContext);
+begin
+  InterlockedDecrement(FPendingIO);
+  AContext.Release;
+end;
+
+function TIocpConnectionRegistry.HasPendingIO: Boolean;
+begin
+  Result := InterlockedCompareExchange(FPendingIO, 0, 0) <> 0;
+end;
+
+destructor TIocpConnectionRegistry.Destroy;
+begin
+  CloseAll;
+  FConnections.Free;
+  FSync.Free;
+  inherited;
+end;
+
+procedure TIocpConnectionRegistry.Add(AContext: TIocpConnectionContext);
+begin
+  FSync.Enter;
+  try
+    FConnections.Add(AContext);
+  finally
+    FSync.Leave;
+  end;
+end;
+
+procedure TIocpConnectionRegistry.Close(AContext: TIocpConnectionContext);
+var
+  LRemoved: Boolean;
+  LSocketToClose: TSocket;
+begin
+  if AContext = nil then
+    Exit;
+
+  if InterlockedExchange(AContext.Closed, 1) <> 0 then
+    Exit;
+
+  FSync.Enter;
+  try
+    LRemoved := FConnections.Remove(AContext) >= 0;
+  finally
+    FSync.Leave;
+  end;
+
+  LSocketToClose := AContext.Socket;
+  AContext.Socket := INVALID_SOCKET;
+  if LSocketToClose <> INVALID_SOCKET then
+    closesocket(LSocketToClose);
+
+  { The initial reference belongs to the registry and may only be released
+    when this registry actually removed the context. }
+  if LRemoved then
+    AContext.Release;
+end;
+
+procedure TIocpConnectionRegistry.CloseAll;
+var
+  I: Integer;
+  LContexts: TList<TIocpConnectionContext>;
+begin
+  LContexts := TList<TIocpConnectionContext>.Create;
+  try
+    FSync.Enter;
+    try
+      for I := 0 to FConnections.Count - 1 do
+      begin
+        FConnections[I].AddRef;
+        LContexts.Add(FConnections[I]);
+      end;
+    finally
+      FSync.Leave;
+    end;
+
+    for I := 0 to LContexts.Count - 1 do
+    begin
+      Close(LContexts[I]);
+      LContexts[I].Release;
+    end;
+  finally
+    LContexts.Free;
+  end;
+end;
+
+procedure TIocpConnectionRegistry.CollectExpired(
+  AExpired: TList<TIocpConnectionContext>; const ANow: Int64);
+var
+  I: Integer;
+  LTimeout: Integer;
+  LContext: TIocpConnectionContext;
+begin
+  LTimeout := THorseProviderAbstract.ReadTimeout;
+  if LTimeout <= 0 then
+    LTimeout := 60000;
+
+  FSync.Enter;
+  try
+    for I := FConnections.Count - 1 downto 0 do
+    begin
+      LContext := FConnections[I];
+      if (not LContext.Accepted) or LContext.Processing then
+        Continue;
+      if ANow - LContext.LastActive > LTimeout then
+      begin
+        { Keep the context alive after leaving the registry lock. }
+        LContext.AddRef;
+        AExpired.Add(LContext);
+      end;
+    end;
+  finally
+    FSync.Leave;
+  end;
 end;
 
 { Callback de processamento no Windows Thread Pool }
@@ -1212,50 +1405,27 @@ begin
     {$ENDIF}
     Dispose(LData);
 
-    if (LContext <> nil) and (InterlockedDecrement(LContext.RefCount) = 0) then
-      LContext.Free;
+    if LContext <> nil then
+      LContext.Release;
   end;
 end;
 
 { THorseIocpWorker }
 
-constructor THorseIocpWorker.Create(AListenSocket: TSocket; AIocpHandle: THandle);
+constructor THorseIocpWorker.Create(AListenSocket: TSocket; AIocpHandle: THandle;
+  ARegistry: TIocpConnectionRegistry; AChecksTimeouts: Boolean);
 begin
   inherited Create(False);
   FListenSocket := AListenSocket;
   FIocpHandle := AIocpHandle;
+  FRegistry := ARegistry;
+  FChecksTimeouts := AChecksTimeouts;
   FRunning := True;
-  FConnections := TList<TIocpConnectionContext>.Create;
-  FConnectionsSync := TCriticalSection.Create;
+  FreeOnTerminate := False;
 end;
 
 destructor THorseIocpWorker.Destroy;
-var
-  I: Integer;
-  LContext: TIocpConnectionContext;
 begin
-  FConnectionsSync.Enter;
-  try
-    for I := 0 to FConnections.Count - 1 do
-    begin
-      LContext := FConnections[I];
-      if LContext <> nil then
-      begin
-        if LContext.Socket <> INVALID_SOCKET then
-        begin
-          closesocket(LContext.Socket);
-          LContext.Socket := INVALID_SOCKET;
-        end;
-        if InterlockedDecrement(LContext.RefCount) = 0 then
-          LContext.Free;
-      end;
-    end;
-    FConnections.Clear;
-  finally
-    FConnectionsSync.Leave;
-  end;
-  FConnections.Free;
-  FConnectionsSync.Free;
   inherited;
 end;
 
@@ -1265,27 +1435,8 @@ begin
 end;
 
 procedure THorseIocpWorker.CloseConnection(AContext: TIocpConnectionContext);
-var
-  LSocketToClose: TSocket;
 begin
-  if AContext = nil then Exit;
-  if InterlockedExchange(AContext.Closed, 1) = 0 then
-  begin
-    FConnectionsSync.Enter;
-    try
-      FConnections.Remove(AContext);
-    finally
-      FConnectionsSync.Leave;
-    end;
-    
-    LSocketToClose := AContext.Socket;
-    AContext.Socket := INVALID_SOCKET;
-    if LSocketToClose <> INVALID_SOCKET then
-      closesocket(LSocketToClose);
-
-    if InterlockedDecrement(AContext.RefCount) = 0 then
-      AContext.Free;
-  end;
+  FRegistry.Close(AContext);
 end;
 
 procedure THorseIocpWorker.CheckTimeouts;
@@ -1298,21 +1449,17 @@ begin
   LNow := GetTickCount64;
   LExpired := TList<TIocpConnectionContext>.Create;
   try
-    FConnectionsSync.Enter;
-    try
-      for I := FConnections.Count - 1 downto 0 do
-      begin
-        LContext := FConnections[I];
-        if LContext.Processing then Continue;
-        if LNow - LContext.LastActive > 60000 then // Keep-Alive timeout de 60s
-          LExpired.Add(LContext);
-      end;
-    finally
-      FConnectionsSync.Leave;
-    end;
+    FRegistry.CollectExpired(LExpired, LNow);
 
     for I := 0 to LExpired.Count - 1 do
-      CloseConnection(LExpired[I]);
+    begin
+      LContext := LExpired[I];
+      try
+        CloseConnection(LContext);
+      finally
+        LContext.Release;
+      end;
+    end;
   finally
     LExpired.Free;
   end;
@@ -1325,22 +1472,22 @@ var
   dwBytes: DWORD;
 begin
   LAcceptSocket := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if LAcceptSocket = INVALID_SOCKET then Exit;
+  if LAcceptSocket = INVALID_SOCKET then
+    Exit;
 
   LContext := TIocpConnectionContext.Create(LAcceptSocket);
-  FConnectionsSync.Enter;
-  try
-    FConnections.Add(LContext);
-  finally
-    FConnectionsSync.Leave;
-  end;
+  FRegistry.Add(LContext);
 
   // Inicia AcceptEx assíncrono
+  FRegistry.BeginIO(LContext);
   if not fnAcceptEx(FListenSocket, LAcceptSocket, @LContext.AcceptOverlapped.Buffer[0],
     0, SizeOf(TSockAddrIn) + 16, SizeOf(TSockAddrIn) + 16, dwBytes, @LContext.AcceptOverlapped.Overlapped) then
   begin
     if WSAGetLastError <> WSA_IO_PENDING then
+    begin
+      FRegistry.EndIO(LContext);
       CloseConnection(LContext);
+    end;
   end;
 end;
 
@@ -1361,6 +1508,8 @@ var
   LBodyOffset, LNewLen: Integer;
   LContentLength: Int64;
   LIsChunked: Boolean;
+  LIsKeepAlive: Boolean;
+  LConnectionHeader: string;
   LRawReq: TIocpRawRequest;
   LRawRes: TIocpRawResponse;
   LReq: THorseRequest;
@@ -1443,7 +1592,10 @@ begin
       AContext.ClientPort
     );
       
-    LRawRes := TIocpRawResponse.Create(AContext, True);
+    LConnectionHeader := LRawReq.GetFieldByName('connection');
+    LIsKeepAlive := not SameText(LConnectionHeader, 'close') and
+      (SameText(LVersion, 'HTTP/1.1') or SameText(LConnectionHeader, 'keep-alive'));
+    LRawRes := TIocpRawResponse.Create(AContext, LIsKeepAlive);
 
     New(LData);
     LData.RawRes := LRawRes;
@@ -1510,6 +1662,7 @@ var
   pOverlap: POverlapped;
   LContext: TIocpConnectionContext;
   LOverlap: PIocpOverlapped;
+  LOpType: TIocpOpType;
   LResult: BOOL;
   LCurrentTime, LLastTimeoutCheck: Int64;
   LOptVal: Integer;
@@ -1519,7 +1672,7 @@ var
 begin
   LLastTimeoutCheck := GetTickCount64;
 
-  while FRunning do
+  while FRunning or FRegistry.HasPendingIO do
   begin
     pOverlap := nil;
     LResult := GetQueuedCompletionStatus(FIocpHandle, dwBytes, dwKey, pOverlap, 500);
@@ -1528,11 +1681,23 @@ begin
     begin
       LOverlap := PIocpOverlapped(pOverlap);
       LContext := TIocpConnectionContext(LOverlap.Context);
+      LOpType := LOverlap.OpType;
+      try
+        if LOpType = ioAccept then
+        begin
+          if not LResult then
+          begin
+            CloseConnection(LContext);
+            if FRunning then
+              PostAccept;
+            Continue;
+          end;
 
-      if LOverlap.OpType = ioAccept then
-      begin
-        // Atualiza o contexto do soquete aceito com as propriedades do soquete de escuta
-        setsockopt(LOverlap.Socket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, PAnsiChar(@FListenSocket), SizeOf(FListenSocket));
+          LContext.Accepted := True;
+          LContext.LastActive := GetTickCount64;
+
+          // Atualiza o contexto do soquete aceito com as propriedades do soquete de escuta
+          setsockopt(LOverlap.Socket, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, PAnsiChar(@FListenSocket), SizeOf(FListenSocket));
         
         // Desativa Algoritmo de Nagle (TCP_NODELAY) para latência ultra-baixa em APIs
         LOptVal := 1;
@@ -1560,41 +1725,49 @@ begin
         if LRemoteAddr <> nil then
           LContext.ClientIP := string(inet_ntoa(PSockAddrIn(LRemoteAddr)^.sin_addr));
 
-        // Associa o soquete do cliente aceito ao Completion Port
-        CreateIoCompletionPort(LOverlap.Socket, FIocpHandle, ULONG_PTR(LContext), 0);
-        
-        // Dispara a leitura inicial assíncrona usando WSARecv
-        PostRead(LContext);
-        
-        // Posta o próximo accept assíncrono para fila do IOCP
-        PostAccept;
-      end
-      else if LOverlap.OpType = ioRead then
-      begin
-        if (dwBytes = 0) or (not LResult) then
-        begin
-          CloseConnection(LContext);
+          // Associa o soquete do cliente aceito ao Completion Port
+          if CreateIoCompletionPort(LOverlap.Socket, FIocpHandle, ULONG_PTR(LContext), 0) = 0 then
+            CloseConnection(LContext)
+          else
+            // Dispara a leitura inicial assíncrona usando WSARecv
+            PostRead(LContext);
+
+          // Mantém ao menos um AcceptEx pendente por worker.
+          if FRunning then
+            PostAccept;
         end
-        else
+        else if LOpType = ioRead then
         begin
-          { ProcessClientRead is the sole owner of re-arming (#13): it PostReads
-            itself when more of the request is still to come, and deliberately does
-            NOT when it dispatched or closed the connection. Do not re-arm here — the
-            old duplicate PostRead double-posted WSARecv and raced the close/free. }
-          ProcessClientRead(LContext, dwBytes);
+          if (dwBytes = 0) or (not LResult) then
+          begin
+            CloseConnection(LContext);
+          end
+          else
+          begin
+            { ProcessClientRead is the sole owner of re-arming (#13): it PostReads
+              itself when more of the request is still to come, and deliberately does
+              NOT when it dispatched or closed the connection. Do not re-arm here — the
+              old duplicate PostRead double-posted WSARecv and raced the close/free. }
+            ProcessClientRead(LContext, dwBytes);
+          end;
+        end
+        else if LOpType = ioWrite then
+        begin
+          if (dwBytes = 0) or (not LResult) then
+            CloseConnection(LContext)
+          else
+            ProcessClientWrite(LContext, dwBytes);
         end;
-      end
-      else if LOverlap.OpType = ioWrite then
-      begin
-        if (dwBytes = 0) or (not LResult) then
-          CloseConnection(LContext)
-        else
-          ProcessClientWrite(LContext, dwBytes);
+      finally
+        { Every overlapped AcceptEx/WSARecv owns one reference until its
+          completion packet has been fully consumed. }
+        if LOpType in [ioAccept, ioRead] then
+          FRegistry.EndIO(LContext);
       end;
     end;
 
     LCurrentTime := GetTickCount64;
-    if LCurrentTime - LLastTimeoutCheck > 1000 then
+    if FChecksTimeouts and (LCurrentTime - LLastTimeoutCheck > 1000) then
     begin
       CheckTimeouts;
       LLastTimeoutCheck := LCurrentTime;
@@ -1609,12 +1782,17 @@ begin
   FPort := GetDefaultPort;
   FHost := GetDefaultHost;
   FWorkers := TObjectList<THorseIocpWorker>.Create(True);
+  FRegistry := TIocpConnectionRegistry.Create;
   FRunning := False;
 end;
 
 class destructor THorseProviderIOCP.DestroyClass;
 begin
+  if FRunning then
+    InternalStopListen;
   FWorkers.Free;
+  FRegistry.CloseAll;
+  FRegistry.Free;
 end;
 
 class procedure THorseProviderIOCP.SetPort(const AValue: Integer);
@@ -1725,7 +1903,8 @@ begin
   // Cria os workers
   for I := 1 to LCPUCount do
   begin
-    LWorker := THorseIocpWorker.Create(FListenSocket, FIocpHandle);
+    LWorker := THorseIocpWorker.Create(FListenSocket, FIocpHandle,
+      FRegistry, I = 1);
     FWorkers.Add(LWorker);
     
     // Inicia os primeiros aceites assíncronos no worker
@@ -1743,19 +1922,24 @@ begin
   for I := 0 to FWorkers.Count - 1 do
     FWorkers[I].TerminateWorker;
 
-  if FIocpHandle <> 0 then
-  begin
-    CloseHandle(FIocpHandle);
-    FIocpHandle := 0;
-  end;
-
   if FListenSocket <> INVALID_SOCKET then
   begin
     closesocket(FListenSocket);
     FListenSocket := INVALID_SOCKET;
   end;
 
+  { Closing every registered socket cancels pending AcceptEx/WSARecv calls.
+    Workers remain alive until all resulting completion packets have released
+    their operation references. }
+  FRegistry.CloseAll;
   FWorkers.Clear;
+
+  if FIocpHandle <> 0 then
+  begin
+    CloseHandle(FIocpHandle);
+    FIocpHandle := 0;
+  end;
+
   WSACleanup;
 end;
 
@@ -1773,18 +1957,22 @@ var
   LWSABuf: {$IFDEF FPC}WSABUF{$ELSE}TWSABUF{$ENDIF};
   dwFlags, dwBytes: DWORD;
 begin
+  if InterlockedCompareExchange(AContext.Closed, 0, 0) <> 0 then
+    Exit;
+
   FillChar(AContext.ReadOverlapped.Overlapped, SizeOf(OVERLAPPED), 0);
   LWSABuf.len := 16384;
   LWSABuf.buf := PAnsiChar(@AContext.ReadOverlapped.Buffer[0]);
   dwFlags := 0;
   dwBytes := 0;
   
+  FRegistry.BeginIO(AContext);
   if WSARecv(AContext.Socket, @LWSABuf, 1, dwBytes, dwFlags, @AContext.ReadOverlapped.Overlapped, nil) = SOCKET_ERROR then
   begin
     if WSAGetLastError() <> WSA_IO_PENDING then
     begin
-      closesocket(AContext.Socket);
-      AContext.Socket := INVALID_SOCKET;
+      FRegistry.EndIO(AContext);
+      FRegistry.Close(AContext);
     end;
   end;
 end;
@@ -1829,6 +2017,22 @@ begin
   InternalStopListen;
 end;
 
+class procedure THorseProviderIOCP.StopListenGraceful(const ATimeoutMS: Integer);
+var
+  LStartedAt: UInt64;
+begin
+  THorseCore.SetIsShuttingDown(True);
+  try
+    LStartedAt := GetTickCount64;
+    while (THorseCore.GetActiveRequests > 0) and
+          (GetTickCount64 - LStartedAt < UInt64(ATimeoutMS)) do
+      Sleep(10);
+    InternalStopListen;
+  finally
+    THorseCore.SetIsShuttingDown(False);
+  end;
+end;
+
 class function THorseProviderIOCP.IsRunning: Boolean;
 begin
   Result := FRunning;
@@ -1856,7 +2060,7 @@ begin
   inherited Create(AResponse);
   LRawWebResponse := AResponse.RawWebResponse;
   if Assigned(LRawWebResponse) and (LRawWebResponse is TInterfacedWebResponse) then
-    FRawRes := TIocpRawResponse(TInterfacedWebResponse(LRawWebResponse).RawRes);
+    FRawRes := TInterfacedWebResponse(LRawWebResponse).RawRes as TIocpRawResponse;
 end;
 
 procedure TIocpStreamWriter.SendFully(const AData: TBytes; ALen: Integer);
@@ -1869,11 +2073,13 @@ begin
     concurrent streaming load a truncated chunk corrupted the response, leaving the
     just-streamed keep-alive connection unusable on reuse (test 36). Loop until every
     byte is sent; stop on error/close (IsConnected then reports false). }
-  if not Assigned(FRawRes) then Exit;
+  if not Assigned(FRawRes) then
+    Exit;
   LTotal := 0;
   while LTotal < ALen do
   begin
-    if FRawRes.FContext.Socket = INVALID_SOCKET then Exit;
+    if FRawRes.FContext.Socket = INVALID_SOCKET then
+      Exit;
     LRet := send(FRawRes.FContext.Socket, AData[LTotal], ALen - LTotal, 0);
     if LRet <= 0 then
       Exit;
@@ -1913,11 +2119,16 @@ begin
     FRawRes.FHeaders.AddOrSetValue('Content-Type', FResponse.CSContentType);
 
   FRawRes.FStatusCode := FResponse.Status;
-  if FRawRes.FStatusCode = 200 then FRawRes.FStatusReason := 'OK'
-  else if FRawRes.FStatusCode = 204 then FRawRes.FStatusReason := 'No Content'
-  else if FRawRes.FStatusCode = 404 then FRawRes.FStatusReason := 'Not Found'
-  else if FRawRes.FStatusCode = 500 then FRawRes.FStatusReason := 'Internal Server Error'
-  else FRawRes.FStatusReason := 'HTTP Response';
+  if FRawRes.FStatusCode = 200 then
+    FRawRes.FStatusReason := 'OK'
+  else if FRawRes.FStatusCode = 204 then
+    FRawRes.FStatusReason := 'No Content'
+  else if FRawRes.FStatusCode = 404 then
+    FRawRes.FStatusReason := 'Not Found'
+  else if FRawRes.FStatusCode = 500 then
+    FRawRes.FStatusReason := 'Internal Server Error'
+  else
+    FRawRes.FStatusReason := 'HTTP Response';
 
   LHeaderBytes := FRawRes.PrepareHeaders;
   if Length(LHeaderBytes) > 0 then
@@ -1928,7 +2139,8 @@ end;
 
 procedure TIocpStreamWriter.WriteRawBytes(const ABytes: TBytes);
 begin
-  if Length(ABytes) = 0 then Exit;
+  if Length(ABytes) = 0 then
+    Exit;
   SendFully(ABytes, Length(ABytes));
 end;
 
@@ -1944,7 +2156,6 @@ end;
 
 initialization
   THorseResponse.RegisterStreamWriterFactory(IocpStreamWriterFactory);
-
 {$ENDIF}
 
 end.

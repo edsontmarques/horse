@@ -22,13 +22,13 @@ uses
 type
   {$IFDEF FPC}
     {$IFDEF MSWINDOWS}
-    TSocket = THandle;
+      TSocket = THandle;
     {$ELSE}
-    TSocket = LongInt;
+      TSocket = LongInt;
     {$ENDIF}
   {$ELSE}
     {$IFNDEF MSWINDOWS}
-    TSocket = Integer;
+      TSocket = Integer;
     {$ENDIF}
   {$ENDIF}
 
@@ -196,6 +196,21 @@ begin
   LTransport.Write(LResponseBytes, Length(LResponseBytes));
 
   LConnection := THorseWebSocketConnection.Create(LTransport, APath, AHeartbeatInterval);
+
+  if Assigned(OnConnect) then
+  begin
+    try
+      OnConnect(LConnection);
+    except
+      on E: Exception do
+      begin
+        LConnection.TriggerError(E);
+        LConnection.Close(1011, 'Internal Error');
+        LConnection.TriggerDisconnect;
+        raise;
+      end;
+    end;
+  end;
 
   // Executa o loop bloqueante na thread worker do provedor (IOCP ou Epoll)
   SetLength(LBuffer, 4096);

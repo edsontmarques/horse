@@ -39,7 +39,7 @@ type
     {$ENDIF}
     FCallNextPath: TCallNextPath;
     FIsGroup: Boolean;
-    FTag: string;
+    FTags: TArray<string>;
     FIsParamsKey: Boolean;
     FPart: string;
     FFound: ^Boolean;
@@ -61,7 +61,7 @@ type
       {$ELSE}
       const AMiddleware: TArray<THorseCallback>;
       {$ENDIF}
-      const ATag: string;
+      const ATags: TArray<string>;
       const AIsParamsKey: Boolean;
       const ACallNextPath: TCallNextPath;
       const APart: string;
@@ -113,7 +113,7 @@ begin
         raise;
       if E is EHorseException then
       begin
-        LNextCaller.FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
+        LNextCaller.FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
         Exit;
       end;
       if THorse.HasOnError then
@@ -147,7 +147,7 @@ procedure TNextCaller.Configure(
   {$ELSE}
   const AMiddleware: TArray<THorseCallback>;
   {$ENDIF}
-  const ATag: string;
+  const ATags: TArray<string>;
   const AIsParamsKey: Boolean;
   const ACallNextPath: TCallNextPath;
   const APart: string;
@@ -162,7 +162,7 @@ begin
   FResponse := AResponse;
   FIsGroup := AIsGroup;
   FMiddleware := AMiddleware;
-  FTag := ATag;
+  FTags := ATags;
   FIsParamsKey := AIsParamsKey;
   FCallNextPath := ACallNextPath;
   FPart := APart;
@@ -173,6 +173,7 @@ procedure TNextCaller.Init;
 var
   LCurrent: THorseBufferSlice;
   LCurrentStr: string;
+  LTag: string;
 begin
   LCurrentStr := '';
   if (not FIsGroup) and (FIndexSegment < Length(FSegments)) then
@@ -185,7 +186,10 @@ begin
   FIndexCallback := -1;
   if FIsParamsKey then
   begin
-    FRequest.Params.Dictionary.AddOrSetValue(FTag, DecodeParam(LCurrentStr));
+    for LTag in FTags do
+    begin
+      FRequest.Params.Dictionary.AddOrSetValue(LTag, DecodeParam(LCurrentStr));
+    end;
   end;
 end;
 
@@ -257,7 +261,7 @@ begin
                     raise;
                   if E is EHorseException then
                   begin
-                    FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
+                    FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
                     Exit;
                   end;
                   if THorse.HasOnError then
@@ -292,7 +296,7 @@ begin
                 raise;
               if E is EHorseException then
               begin
-                FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
+                FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
                 Exit;
               end;
               if THorse.HasOnError then
