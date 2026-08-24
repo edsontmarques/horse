@@ -1,7 +1,7 @@
 unit Horse.Response;
 
 {$IF DEFINED(FPC)}
-{$MODE DELPHI}{$H+}
+  {$MODE DELPHI}{$H+}
 {$ENDIF}
 
 interface
@@ -17,10 +17,11 @@ uses
   System.SysUtils,
   System.Classes,
   Web.HTTPApp,
-{$IF CompilerVersion > 32.0}
-  Web.ReqMulti,
+  {$IF CompilerVersion > 32.0}
+    Web.ReqMulti,
+  {$ENDIF}
 {$ENDIF}
-{$ENDIF}
+
 { ===========================================================================
   PATCH-RES-1 — added System.Generics.Collections (Delphi only)
   Reason: FCustomHeaders is TList<TPair<string,string>> on Delphi.
@@ -29,7 +30,7 @@ uses
 {$IF NOT DEFINED(FPC)}
   System.Generics.Collections,
 {$ENDIF}
-{ =========================================================================== }
+
   Horse.Commons,
   Horse.Core.Cookie,
   Horse.Core.WebSocket;
@@ -163,6 +164,19 @@ type
     procedure EnsureCustomHeaders;
 { REPEATHDR-1 — lazy-allocation helper for FRepeatHeaders (mirrors EnsureCustomHeaders). }
     procedure EnsureRepeatHeaders;
+    function GetContentStream: TStream;
+    function GetCSContentType: string;
+{ =========================================================================== }
+{ ===========================================================================
+  PATCH-RES-8 — Send<TStream> / Send(TStream) stream body support.
+  Copies AStream into the active body slot (FCSContentStream on
+  CrossSocket/mORMot/nghttp2/IOCP/Epoll, FWebResponse.ContentStream on
+  Indy/WebBroker), applies a default Content-Type of application/octet-stream
+  if none was set, then frees AStream (ownership transfer).  Reused by both
+  the non-generic Send(TStream) overload and the generic Send<T> when T is a
+  TStream descendant.
+  =========================================================================== }
+    procedure DoSendStream(const AStream: TStream);
 { =========================================================================== }
   public
     class procedure RegisterStreamWriterFactory(const AFactory: THorseStreamWriterFactory);
@@ -170,6 +184,13 @@ type
     function SendStream(const ACallback: THorseStreamAnonProc): THorseResponse; overload;
     function Send(const AContent: string): THorseResponse; overload; virtual;
     function Send(const AContent: TBytes): THorseResponse; overload; virtual;
+{ PATCH-RES-8 — non-generic Send(TStream) overload.
+  Copies AContent into the response body, defaults Content-Type to
+  application/octet-stream if none was set, then Frees AContent
+  (Horse takes ownership).  The generic Send<T> below routes TStream
+  descendants through the same path via DoSendStream, so both
+  `Res.Send(S)` and `Res.Send<TStream>(S)` work identically. }
+    function Send(const AContent: TStream): THorseResponse; overload; virtual;
     function Send<T{$IF NOT DEFINED(FPC)}: class{$ENDIF}>(AContent: T): THorseResponse; overload;
     function RedirectTo(const ALocation: string): THorseResponse; overload; virtual;
     function RedirectTo(const ALocation: string; const AStatus: THTTPStatus): THorseResponse; overload; virtual;
@@ -242,8 +263,8 @@ type
   FWebResponse is nil (CrossSocket path); on the Indy path they are empty.
   =========================================================================== }
     property BodyText:       string  read FCSBody;
-    property ContentStream:  TStream read FCSContentStream;
-    property CSContentType:  string  read FCSContentType;
+    property ContentStream:  TStream read GetContentStream;
+    property CSContentType:  string  read GetCSContentType;
     property BodyBytes:      TBytes  read FCSBodyBytes;
 { =========================================================================== }
     function Abort: THorseResponse; virtual;
@@ -263,7 +284,8 @@ uses
   Horse.Request,
   Horse.Core,
   Horse.Exception.Interrupted,
-  Horse.Core.MemoryBufferPool
+  Horse.Core.MemoryBufferPool,
+  Horse.Provider.RawAdapters
   {$IF DEFINED(FPC)}
   , fphttpserver
   , ssockets
@@ -477,6 +499,27 @@ end;
 function THorseResponse.Content: TObject;
 begin
   Result := FContent;
+end;
+
+function THorseResponse.GetContentStream: TStream;
+begin
+  Result := FCSContentStream;
+  if (Result = nil) and Assigned(FCSRawWebResponse) then
+  begin
+    {$IF NOT DEFINED(FPC)}
+    if FCSRawWebResponse is TInterfacedWebResponse then
+      Result := TInterfacedWebResponse(FCSRawWebResponse).ContentStream
+    else
+    {$ENDIF}
+      Result := FCSRawWebResponse.ContentStream;
+  end;
+end;
+
+function THorseResponse.GetCSContentType: string;
+begin
+  Result := FCSContentType;
+  if (Result = '') and Assigned(FCSRawWebResponse) then
+    Result := FCSRawWebResponse.ContentType;
 end;
 
 function THorseResponse.ContentType(const AContentType: string): THorseResponse;
@@ -695,8 +738,79 @@ end;
 
 function THorseResponse.Send<T>(AContent: T): THorseResponse;
 begin
-  FContent := AContent;
+{ PATCH-RES-8 — TStream fast path.  Prior to this patch, Send<T> stored the
+  argument in FContent (a slot for content-type middleware such as
+  horse-jhonson) and returned.  No provider bridge ever read FContent as a
+  stream, so `Res.Send<TStream>(S)` produced `HTTP 200 Content-Length: 0`
+  on every provider.  Now: if T is a TStream, route to DoSendStream which
+  copies bytes into the active body slot and takes ownership.  Non-stream
+  callers hit the else-branch below, whose behavior is identical to before. }
+  if TObject(AContent) is TStream then
+    DoSendStream(TStream(TObject(AContent)))
+  else
+    FContent := AContent;
   Result := Self;
+end;
+
+{ PATCH-RES-8 — non-generic Send(TStream) overload.  Compiler picks this over
+  the generic Send<T> when the argument's static type is TStream (or a known
+  subclass at the call site), so `Res.Send(myMemStream)` doesn't need the
+  explicit `<TStream>` generic instantiation.  Both call paths funnel through
+  DoSendStream, so ownership and Content-Type behavior are identical. }
+function THorseResponse.Send(const AContent: TStream): THorseResponse;
+begin
+  DoSendStream(AContent);
+  Result := Self;
+end;
+
+{ PATCH-RES-8 — shared stream body helper.  Copies AStream into the active
+  body slot (FCSContentStream for CrossSocket/mORMot/nghttp2/IOCP/Epoll,
+  FWebResponse.ContentStream for Indy/WebBroker) so the provider bridge's
+  existing ContentStream reader picks it up.  Sets a default Content-Type of
+  application/octet-stream only if the caller didn't already set one.
+  Frees AStream after copying — Horse takes ownership, matching the
+  historical Send<T> contract where Clear/Destroy freed FContent. }
+procedure THorseResponse.DoSendStream(const AStream: TStream);
+var
+  LCopy: TMemoryStream;
+begin
+  if not Assigned(AStream) then
+    Exit;
+
+  AStream.Position := 0;
+
+  if not Assigned(FWebResponse) then
+  begin
+    { CrossSocket-family path — mirrors PATCH-SENDFILE-1's copy-and-own pattern.
+      Free any prior owned stream first so double-Send calls don't leak. }
+    if FCSOwnsContentStream and Assigned(FCSContentStream) then
+      FreeAndNil(FCSContentStream);
+    LCopy := TMemoryStream.Create;
+    if AStream.Size > 0 then
+      LCopy.CopyFrom(AStream, AStream.Size);
+    LCopy.Position := 0;
+    FCSContentStream     := LCopy;
+    FCSOwnsContentStream := True;
+    if FCSContentType = '' then
+      FCSContentType := 'application/octet-stream';
+  end
+  else
+  begin
+    { Indy/WebBroker path — mirrors PATCH-SENDFILE-1's Indy branch.  Copy into
+      a fresh TMemoryStream and hand ownership to TWebResponse via
+      FreeContentStream := True so the caller's source stream is decoupled. }
+    LCopy := TMemoryStream.Create;
+    if AStream.Size > 0 then
+      LCopy.CopyFrom(AStream, AStream.Size);
+    LCopy.Position := 0;
+    FWebResponse.ContentStream     := LCopy;
+    FWebResponse.FreeContentStream := True;
+    FWebResponse.ContentLength     := LCopy.Size;
+    if FWebResponse.ContentType = '' then
+      FWebResponse.ContentType := 'application/octet-stream';
+  end;
+
+  AStream.Free;
 end;
 
 function THorseResponse.RedirectTo(const ALocation: string): THorseResponse;
@@ -1026,21 +1140,8 @@ begin
   end;
 
   LUpgrader := THorseWebSocketUpgrader(LUpgraderObj);
+  LUpgrader.OnConnect := AOnConnect;
   LConnection := LUpgrader.Upgrade(LRequest.PathInfo, 30);
-  
-  if Assigned(AOnConnect) then
-  begin
-    try
-      AOnConnect(LConnection);
-    except
-      on E: Exception do
-      begin
-        LConnection.TriggerError(E);
-        LConnection.Close(1011, 'Internal Error');
-        raise;
-      end;
-    end;
-  end;
   
   Result := LConnection;
 end;
@@ -1258,6 +1359,10 @@ begin
 end;
 
 initialization
+{$IF NOT DEFINED(HORSE_PROVIDER_IOCP) AND
+     NOT DEFINED(HORSE_PROVIDER_HTTPSYS) AND
+     NOT DEFINED(HORSE_PROVIDER_EPOLL)}
   THorseResponse.RegisterStreamWriterFactory(DefaultWebBrokerStreamWriterFactory);
+{$ENDIF}
 
 end.

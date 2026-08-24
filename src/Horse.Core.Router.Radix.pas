@@ -1,4 +1,4 @@
-unit Horse.Core.Router.Radix;
+﻿unit Horse.Core.Router.Radix;
 
 {$IF DEFINED(FPC)}
   {$MODE DELPHI}{$H+}
@@ -64,6 +64,7 @@ type
   { Roteador Radix de alta performance e vetorizado em software (SWAR 64-bit) }
   THorseRadixRouter = class(TInterfacedObject, IHorseRouter)
   private
+    FPrefix: string;
     FRoot: TRadixNode;
     FGlobalMiddlewares: TList<THorseCallback>;
     {$IFDEF FPC}
@@ -85,6 +86,8 @@ type
     {$IFDEF FPC}
     function MatchStaticRoute(const ABuffer: TBytes; const APathSpan: TByteSpan; const AMethod: TMethodType; out ACallbacks: TList<THorseCallback>): Boolean;
     {$ENDIF}
+    function GetPrefix: string;
+    procedure Prefix(const APrefix: string);
     procedure RegisterRoute(const AHTTPType: TMethodType; const APath: string; const ACallback: THorseCallback);
     procedure RegisterRouteMiddleware(const AHTTPType: TMethodType; const APath: string; const ACallback: THorseCallback);
     procedure RegisterMiddleware(const APath: string; const AMiddleware: THorseCallback); overload;
@@ -362,7 +365,7 @@ begin
           raise;
         if E is EHorseException then
         begin
-          FResponse.Send(EHorseException(E).Error).Status(EHorseException(E).Status);
+          FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
           Exit;
         end;
         if THorse.HasOnError then
@@ -478,6 +481,7 @@ end;
 
 constructor THorseRadixRouter.Create;
 begin
+  FPrefix := '';
   FRoot := TRadixNode.Create('');
   FGlobalMiddlewares := TList<THorseCallback>.Create;
   {$IFDEF FPC}
@@ -570,6 +574,7 @@ var
   LItem: TStaticRouteItem;
   LPathLen: Integer;
   LMatch: Boolean;
+  B1, B2: Byte;
 begin
   ACallbacks := nil;
   if not FStaticRoutesBuilt then
@@ -584,7 +589,14 @@ begin
       LMatch := True;
       for J := 0 to LPathLen - 1 do
       begin
-        if ABuffer[APathSpan.Offset + J] <> LItem.PathBytes[J] then
+        B1 := ABuffer[APathSpan.Offset + J];
+        B2 := LItem.PathBytes[J];
+        if not THorseCore.CaseSensitive then
+        begin
+          if (B1 >= 65) and (B1 <= 90) then B1 := B1 + 32;
+          if (B2 >= 65) and (B2 <= 90) then B2 := B2 + 32;
+        end;
+        if B1 <> B2 then
         begin
           LMatch := False;
           Break;
@@ -610,8 +622,19 @@ var
   LChild: TRadixNode;
   LFound: Boolean;
   I: Integer;
+  LFullPath: string;
 begin
-  LSegments := APath.Trim(['/']).Split(['/']);
+  if FPrefix <> '' then
+  begin
+    if not APath.StartsWith('/') then
+      LFullPath := FPrefix + '/' + APath
+    else
+      LFullPath := FPrefix + APath;
+  end
+  else
+    LFullPath := APath;
+
+  LSegments := LFullPath.Trim(['/']).Split(['/']);
   LCurrent := FRoot;
 
   for I := 0 to Length(LSegments) - 1 do
@@ -620,14 +643,32 @@ begin
     if (LSeg = '') and (I > 0) and (I = Length(LSegments) - 1) then
       Continue;
 
+    if not THorseCore.CaseSensitive then
+    begin
+      if (not LSeg.StartsWith(':')) and (not LSeg.StartsWith('(')) then
+        LSeg := LowerCase(LSeg);
+    end;
+
     LFound := False;
     for LChild in LCurrent.Children do
     begin
-      if SameText(LChild.Part, LSeg) then
+      if THorseCore.CaseSensitive then
       begin
-        LCurrent := LChild;
-        LFound := True;
-        Break;
+        if LChild.Part = LSeg then
+        begin
+          LCurrent := LChild;
+          LFound := True;
+          Break;
+        end;
+      end
+      else
+      begin
+        if SameText(LChild.Part, LSeg) then
+        begin
+          LCurrent := LChild;
+          LFound := True;
+          Break;
+        end;
       end;
     end;
 
@@ -640,7 +681,17 @@ begin
   end;
 
   LCurrent.AddRouteCallback(AHTTPType, ACallback, AIsMiddleware);
-  LCurrent.FullPath := '/' + APath.Trim(['/']);
+  LCurrent.FullPath := '/' + LFullPath.Trim(['/']);
+end;
+
+function THorseRadixRouter.GetPrefix: string;
+begin
+  Result := FPrefix;
+end;
+
+procedure THorseRadixRouter.Prefix(const APrefix: string);
+begin
+  FPrefix := '/' + APrefix.Trim(['/']);
 end;
 
 procedure THorseRadixRouter.RegisterRoute(const AHTTPType: TMethodType; const APath: string; const ACallback: THorseCallback);
@@ -715,7 +766,7 @@ begin
   // 1. Tenta correspondência exata via SWAR 64-bit
   for LChild in ANode.Children do
   begin
-    if (not LChild.IsParam) and (LChild.Part <> '*') and LCurrentSlice.Compare(LChild.Part, True) then
+    if (not LChild.IsParam) and (LChild.Part <> '*') and LCurrentSlice.Compare(LChild.Part, not THorseCore.CaseSensitive) then
     begin
       LTempNode := LChild;
       LBestMatch := FindNode(ASegments, AIndex + 1, LTempNode, AHTTPType, AMiddlewares, AParams);

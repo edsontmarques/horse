@@ -1,4 +1,4 @@
-unit Horse.Provider.HttpSys;
+﻿unit Horse.Provider.HttpSys;
 
 {$IF DEFINED(FPC)}
   {$MODE DELPHI}{$H+}
@@ -39,22 +39,17 @@ uses
 {$IFNDEF FPC}
 type
   {$IF CompilerVersion >= 31.0}
-  THttpSysString = string;
+    THttpSysString = string;
   {$ELSE}
-  THttpSysString = AnsiString;
+    THttpSysString = AnsiString;
   {$IFEND}
 {$ENDIF}
 
 const
   HTTPAPI_DLL = 'httpapi.dll';
-
   HTTP_INITIALIZE_SERVER = $00000001;
-
-  // HttpSendHttpResponse flags
   HTTP_SEND_RESPONSE_FLAG_DISCONNECT  = $00000001;
   HTTP_SEND_RESPONSE_FLAG_MORE_DATA   = $00000002;
-
-  // Request flags
   HTTP_REQUEST_FLAG_MORE_ENTITY_BODY_EXISTS = $00000001;
 
 {$MINENUMSIZE 4}
@@ -128,6 +123,7 @@ type
     pName: PAnsiChar;
     pRawValue: PAnsiChar;
   end;
+
   PHTTP_UNKNOWN_HEADER = ^HTTP_UNKNOWN_HEADER;
   THTTP_UNKNOWN_HEADER_ARRAY = array[0..65535] of HTTP_UNKNOWN_HEADER;
   PHTTP_UNKNOWN_HEADER_ARRAY = ^THTTP_UNKNOWN_HEADER_ARRAY;
@@ -163,6 +159,7 @@ type
     pClientCertInfo: Pointer;
     SslClientCertNegotiated: ULONG;
   end;
+
   PHTTP_SSL_INFO = ^HTTP_SSL_INFO;
 
   HTTP_REQUEST = record
@@ -187,6 +184,7 @@ type
     RequestInfoCount: USHORT;
     pRequestInfo: Pointer;
   end;
+
   PHTTP_REQUEST = ^HTTP_REQUEST;
 
   THttpChunkType = (
@@ -201,23 +199,24 @@ type
     pBuffer: Pointer;
     BufferLength: ULONG;
     {$IFDEF CPUX64}
-    Reserved2: array[0..2] of ULONG;
+      Reserved2: array[0..2] of ULONG;
     {$ELSE}
-    Reserved2: array[0..3] of ULONG;
+      Reserved2: array[0..3] of ULONG;
     {$ENDIF}
   end;
+
   PHTTP_DATA_CHUNK_INMEMORY = ^HTTP_DATA_CHUNK_INMEMORY;
 
   HTTP_DATA_CHUNK_FILE = record
     DataChunkType: THttpChunkType;
     {$IFDEF CPUX64}
-    Reserved1: ULONG;
+      Reserved1: ULONG;
     {$ENDIF}
     StartingOffset: UInt64;
     Length: UInt64;
     FileHandle: THandle;
     {$IFNDEF CPUX64}
-    Reserved2: array[0..1] of ULONG;
+      Reserved2: array[0..1] of ULONG;
     {$ENDIF}
   end;
 
@@ -233,6 +232,7 @@ type
     ResponseInfoCount: USHORT;
     pResponseInfo: Pointer;
   end;
+
   PHTTP_RESPONSE = ^HTTP_RESPONSE;
 
   THTTP_SERVER_PROPERTY = (
@@ -250,6 +250,7 @@ type
     Flags: ULONG;
     RequestQueueHandle: THandle;
   end;
+
   PHTTP_BINDING_INFO = ^HTTP_BINDING_INFO;
 
   TSockAddrIn = record
@@ -258,6 +259,7 @@ type
     sin_addr: array[0..3] of Byte;
     sin_zero: array[0..7] of Byte;
   end;
+
   PSockAddrIn = ^TSockAddrIn;
 
 const
@@ -283,7 +285,6 @@ const
     'Set-Cookie', 'Vary', 'Www-Authenticate'
   );
 
-// Windows Http.sys native APIs
 {$IFNDEF FPC}
 function GetTickCount64: UInt64; stdcall; external 'kernel32.dll' name 'GetTickCount64';
 {$ENDIF}
@@ -486,6 +487,7 @@ type
     class procedure ListenWithConfig(const APort: Integer; const AConfig: THorseCrossSocketConfig); override;
     class function GetActivePort: Integer; override;
     class procedure StopListen; override;
+    class procedure StopListenGraceful(const ATimeoutMS: Integer = 5000); override;
     class function IsRunning: Boolean;
 
     class property ServerSessionId: HTTP_SERVER_SESSION_ID read FServerSessionId;
@@ -1096,19 +1098,33 @@ end;
 function THttpSysRawRequest.GetServerPort: Integer;
 var
   LFamily: Word;
+  LHost: string;
+  LPortSeparator: Integer;
+  LHostPort: Integer;
   LIPv4: PSockAddrIn;
 begin
-  if FRequest.Address.pLocalAddress = nil then
-    Exit(80);
-
-  LFamily := PWord(FRequest.Address.pLocalAddress)^;
-  if LFamily = 2 then // AF_INET
+  Result := 80;
+  if FRequest.Address.pLocalAddress <> nil then
   begin
-    LIPv4 := PSockAddrIn(FRequest.Address.pLocalAddress);
-    Result := (LIPv4.sin_port shl 8) or (LIPv4.sin_port shr 8); // Swap endianness
-  end
-  else
-    Result := 80;
+    LFamily := PWord(FRequest.Address.pLocalAddress)^;
+    if LFamily = 2 then // AF_INET
+    begin
+      LIPv4 := PSockAddrIn(FRequest.Address.pLocalAddress);
+      Result := (LIPv4.sin_port shl 8) or (LIPv4.sin_port shr 8); // Swap endianness
+    end;
+  end;
+
+  { HTTP.sys may expose an IPv6 local address even when the request Host header
+    contains the application port. Prefer that explicit port so THorseInstance
+    can resolve the correct isolated router. }
+  LHost := GetHost;
+  LPortSeparator := LastDelimiter(':', LHost);
+  if LPortSeparator > 0 then
+  begin
+    LHostPort := StrToIntDef(Copy(LHost, LPortSeparator + 1, MaxInt), 0);
+    if LHostPort > 0 then
+      Result := LHostPort;
+  end;
 end;
 
 function THttpSysRawRequest.GetContentType: string;
@@ -2195,6 +2211,22 @@ begin
   InternalStopListen;
 end;
 
+class procedure THorseProviderHttpSys.StopListenGraceful(const ATimeoutMS: Integer);
+var
+  LStartedAt: UInt64;
+begin
+  THorseCore.SetIsShuttingDown(True);
+  try
+    LStartedAt := GetTickCount64;
+    while (THorseCore.GetActiveRequests > 0) and
+          (GetTickCount64 - LStartedAt < UInt64(ATimeoutMS)) do
+      Sleep(10);
+    InternalStopListen;
+  finally
+    THorseCore.SetIsShuttingDown(False);
+  end;
+end;
+
 class function THorseProviderHttpSys.IsRunning: Boolean;
 begin
   Result := FRunning;
@@ -2231,7 +2263,7 @@ begin
   LRawResponse := nil;
   LRawWebResponse := AResponse.RawWebResponse;
   if Assigned(LRawWebResponse) and (LRawWebResponse is TInterfacedWebResponse) then
-    LRawResponse := THttpSysRawResponse(TInterfacedWebResponse(LRawWebResponse).RawRes);
+    LRawResponse := TInterfacedWebResponse(LRawWebResponse).RawRes as THttpSysRawResponse;
 
   FRawRes := LRawResponse;
   if Assigned(LRawResponse) then

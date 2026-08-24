@@ -1,11 +1,10 @@
-unit Horse.Provider.VCL;
-
-{ PATCH-VCL-1: ListenWithConfig override — same root cause as PATCH-CONSOLE-1. }
+﻿unit Horse.Provider.VCL;
 
 interface
 
 {$IF DEFINED(HORSE_VCL)}
 uses
+  Horse.Core,
   Horse.Provider.Abstract,
   Horse.Provider.Config,
   Horse.Constants,
@@ -68,9 +67,7 @@ type
     class procedure Listen(const APort: Integer; const ACallbackListen: TProc; const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
     class procedure Listen(const AHost: string; const ACallbackListen: TProc = nil; const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
     class procedure Listen(const ACallbackListen: TProc; const ACallbackStopListen: TProc = nil); reintroduce; overload; static;
-    // PATCH-VCL-1
-    class procedure ListenWithConfig(const APort: Integer;
-      const AConfig: THorseCrossSocketConfig); override;
+    class procedure ListenWithConfig(const APort: Integer; const AConfig: THorseCrossSocketConfig); override;
     class function IsRunning: Boolean;
     class destructor UnInitialize;
   end;
@@ -82,8 +79,7 @@ implementation
 uses
   Web.WebReq,
   Horse.WebModule,
-  IdCustomTCPServer,
-  System.Classes;
+  IdCustomTCPServer;
 
 class function THorseProvider.IsRunning: Boolean;
 begin
@@ -297,6 +293,7 @@ begin
       while (TThread.GetTickCount - LStart < ATimeoutMS) do
       begin
         LCount := 0;
+
         try
           LContexts := GetDefaultHTTPWebBroker.Contexts.LockList;
           try
@@ -305,10 +302,13 @@ begin
             GetDefaultHTTPWebBroker.Contexts.UnlockList;
           end;
         except
+
         end;
 
         if (THorseCore.GetActiveRequests = 0) and (LCount = 0) then
+        begin
           Break;
+        end;
 
         TThread.Sleep(50);
       end;
@@ -323,7 +323,9 @@ begin
     end;
   end
   else
+  begin
     raise Exception.Create('Horse not listen');
+  end;
 end;
 
 class procedure THorseProvider.Listen;
@@ -355,9 +357,7 @@ begin
   Listen(APort, FHost, ACallbackListen, ACallbackStopListen);
 end;
 
-// PATCH-VCL-1
-class procedure THorseProvider.ListenWithConfig(const APort: Integer;
-  const AConfig: THorseCrossSocketConfig);
+class procedure THorseProvider.ListenWithConfig(const APort: Integer; const AConfig: THorseCrossSocketConfig);
 begin
   SetPort(APort);
   InternalListen;

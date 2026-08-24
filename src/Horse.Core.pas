@@ -1,4 +1,4 @@
-unit Horse.Core;
+﻿unit Horse.Core;
 
 {$IF DEFINED(FPC)}
   {$MODE DELPHI}{$H+}
@@ -59,6 +59,9 @@ type
 
   THorseCore = class(THorseCoreBase)
   private
+    class var FCaseSensitive: Boolean;
+    class function GetCaseSensitive: Boolean; static; inline;
+    class procedure SetCaseSensitive(const AValue: Boolean); static; inline;
     class var FRoutes: IHorseRouter;
     class var FCallbacks: TList<THorseCallback>;
     class var FOnRequest: TList<THorseCallback>;
@@ -86,21 +89,28 @@ type
 
     class function GetCallback(const ACallbackRequest: THorseCallbackRequestResponse): THorseCallback; overload;
     class function GetCallback(const ACallbackRequest: THorseCallbackRequest): THorseCallback; overload;
-{$IFNDEF FPC}
+    {$IFNDEF FPC}
     class function GetCallback(const ACallbackResponse: THorseCallbackResponse): THorseCallback; overload;
-{$ENDIF}
+    {$ENDIF}
+
     {$IF DEFINED(FPC)}
     class function GetCallbacks: TList<THorseCallback>;
     {$ELSE}
     class function GetCallbacks: TArray<THorseCallback>;
     {$ENDIF}
+
     class function RegisterCallbacksRoute(const AMethod: TMethodType; const APath: string): THorseCore;
+
+    {$IF DEFINED(FPC)}
     procedure EmptyNext;
+    {$ENDIF}
   public
+    class property CaseSensitive: Boolean read GetCaseSensitive write SetCaseSensitive;
     constructor Create; virtual;
     class function ToModule: THorseModule;
     class destructor UnInitialize; {$IFNDEF FPC}virtual; {$ENDIF}
     class function AddCallback(const ACallback: THorseCallback): THorseCore; overload;
+
     {$IF DEFINED(FPC)}
     class function AddCallbacks(const ACallbacks: TList<THorseCallback>): THorseCore; overload;
     {$ELSE}
@@ -391,6 +401,16 @@ end;
   {$I Horse.Core.Wrappers.inc}
 {$ENDIF}
 
+class function THorseCore.GetCaseSensitive: Boolean;
+begin
+  Result := FCaseSensitive;
+end;
+
+class procedure THorseCore.SetCaseSensitive(const AValue: Boolean);
+begin
+  FCaseSensitive := AValue;
+end;
+
 class function THorseCore.AddCallback(const ACallback: THorseCallback): THorseCore;
 begin
   Result := GetInstance;
@@ -423,9 +443,12 @@ begin
 end;
 {$ENDIF}
 
+{$IF DEFINED(FPC)}
 procedure THorseCore.EmptyNext;
 begin
+
 end;
+{$ENDIF}
 
 constructor THorseCore.Create;
 begin
@@ -1731,6 +1754,7 @@ begin
 end;
 
 initialization
+  THorseCore.FCaseSensitive := False;
   GetHorseCoreInstance := @THorseCore.GetInstance;
 
 end.
