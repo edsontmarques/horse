@@ -73,8 +73,14 @@ uses
   Tests.Horse.Core.Group in 'tests\Tests.Horse.Core.Group.pas',
   {$IFNDEF FPC}
   Tests.Horse.Core.Router.Radix in 'tests\Tests.Horse.Core.Router.Radix.pas',
+  {$ELSE}
+  Tests.Horse.Core.Router.Radix.FPC in 'tests\Tests.Horse.Core.Router.Radix.FPC.pas',
   {$ENDIF}
   Tests.Horse.Request.Recycle in 'tests\Tests.Horse.Request.Recycle.pas',
+  Tests.Horse.Request.DecodeOnce in 'tests\Tests.Horse.Request.DecodeOnce.pas',
+  Tests.Horse.Utils in 'tests\Tests.Horse.Utils.pas',
+  Tests.Horse.Core.RouterLifetime in 'tests\Tests.Horse.Core.RouterLifetime.pas',
+  Tests.Horse.Core.Cookie in 'tests\Tests.Horse.Core.Cookie.pas',
   Tests.Horse.Core.Middleware in 'tests\Tests.Horse.Core.Middleware.pas',
   Tests.Integration.Concurrency in 'tests\Tests.Integration.Concurrency.pas',
   Tests.Integration.ErrorHandling in 'tests\Tests.Integration.ErrorHandling.pas',
@@ -83,6 +89,7 @@ uses
   Tests.Integration.LargePayload in 'tests\Tests.Integration.LargePayload.pas',
   Tests.Integration.ReadTimeout in 'tests\Tests.Integration.ReadTimeout.pas',
   Tests.Integration.Query in 'tests\Tests.Integration.Query.pas',
+  Tests.Integration.QueryDecode in 'tests\Tests.Integration.QueryDecode.pas',
   Tests.Integration.LifecycleHooks in 'tests\Tests.Integration.LifecycleHooks.pas',
   Tests.Integration.GracefulShutdown in 'tests\Tests.Integration.GracefulShutdown.pas',
   Tests.Integration.DependencyInjection in 'tests\Tests.Integration.DependencyInjection.pas',
@@ -92,6 +99,7 @@ uses
   Tests.Integration.WebSocket in 'tests\Tests.Integration.WebSocket.pas',
   Tests.Integration.AdvancedRouting in 'tests\Tests.Integration.AdvancedRouting.pas',
   Tests.Integration.Streaming in 'tests\Tests.Integration.Streaming.pas',
+  Tests.Horse.Provider.RawAdapters in 'tests\Tests.Horse.Provider.RawAdapters.pas',
   {$IFDEF HORSE_PROVIDER_IOCP}
   Tests.Horse.Provider.IOCP in 'tests\Tests.Horse.Provider.IOCP.pas',
   {$ENDIF}

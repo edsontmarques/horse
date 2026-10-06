@@ -35,6 +35,9 @@ type
     procedure PopulateQueuePath(AQueue: TQueue<string>; APath: string; const AUsePrefix: Boolean = True);
   private
     FPart: string;
+{$IF SizeOf(Char) > 1}
+    FPartBytes: TArray<Byte>;
+{$ENDIF}
     FTags: TArray<string>;
     FFullPath: string;
     FIsParamsKey: Boolean;
@@ -60,6 +63,7 @@ type
     function CallNextPath(const ASegments: TArray<THorseBufferSlice>; AIndex: Integer; const AHTTPType: TMethodType; const ARequest: THorseRequest; const AResponse: THorseResponse): Boolean;
     function HasNext(const AMethod: TMethodType; const APaths: TArray<THorseBufferSlice>; AIndex: Integer = 0): Boolean;
     function CountLiteralSegments(const AMethod: TMethodType; const APaths: TArray<THorseBufferSlice>; AIndex: Integer = 0): Integer;
+    function MatchesPart(const APart: THorseBufferSlice): Boolean;
     class function NormalizeParamKey(const APart: string): string; static;
   public
     function CreateRouter(const APath: string): THorseRouterTree;
@@ -70,9 +74,6 @@ type
     procedure RegisterMiddleware(const APath: string; const AMiddleware: THorseCallback); overload;
     procedure RegisterMiddleware(const AMiddleware: THorseCallback); overload;
     function Execute(const ARequest: THorseRequest; const AResponse: THorseResponse): Boolean;
-  protected
-    function _AddRef: Integer; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
-    function _Release: Integer; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
   public
     constructor Create;
     destructor Destroy; override;
@@ -229,6 +230,16 @@ begin
     Result := APart;
 end;
 
+function THorseRouterTree.MatchesPart(const APart: THorseBufferSlice): Boolean;
+begin
+{$IF SizeOf(Char) = 1}
+  Result := APart.Compare(FPart, not THorseCore.CaseSensitive);
+{$ELSE}
+  Result := APart.CompareBytes(FPartBytes, 0, Length(FPartBytes),
+    not THorseCore.CaseSensitive);
+{$ENDIF}
+end;
+
 procedure THorseRouterTree.RegisterRoute(const AHTTPType: TMethodType; const APath: string; const ACallback: THorseCallback);
 var
   LPathChain: TQueue<string>;
@@ -290,7 +301,7 @@ begin
   
   for LPair in FRoute do
   begin
-    if (LPair.Key <> '*') and LCurrent.Compare(LPair.Key, not THorseCore.CaseSensitive) then
+    if (LPair.Key <> '*') and LPair.Value.MatchesPart(LCurrent) then
     begin
       LAcceptable := LPair.Value;
       LFound := True;
@@ -331,16 +342,6 @@ begin
   else if LFound then
     LFound := LAcceptable.ExecuteInternal(ASegments, AIndex, AHTTPType, ARequest, AResponse, LIsGroup);
   Result := LFound;
-end;
-
-function THorseRouterTree._AddRef: Integer; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
-begin
-  Result := -1;
-end;
-
-function THorseRouterTree._Release: Integer; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
-begin
-  Result := -1;
 end;
 
 constructor THorseRouterTree.Create;
@@ -610,7 +611,7 @@ begin
   LNextRoute := nil;
   for LPair in FRoute do
   begin
-    if LNext.Compare(LPair.Key, not THorseCore.CaseSensitive) or (LPair.Key = '*') then
+    if LPair.Value.MatchesPart(LNext) or (LPair.Key = '*') then
     begin
       LNextRoute := LPair.Value;
       LFound := True;
@@ -653,7 +654,8 @@ begin
     if Length(APaths) - 1 = AIndex then
       Exit(FCallBack.ContainsKey(AMethod) or (AMethod = mtAny));
   end
-  else if (Length(APaths) - 1 = AIndex) and (APaths[AIndex].Compare(FPart, not THorseCore.CaseSensitive) or FIsParamsKey) then
+  else if (Length(APaths) - 1 = AIndex) and
+    (MatchesPart(APaths[AIndex]) or FIsParamsKey) then
   begin
     Exit(FCallBack.ContainsKey(AMethod) or (AMethod = mtAny));
   end;
@@ -665,7 +667,7 @@ begin
   LNextRoute := nil;
   for LPair in FRoute do
   begin
-    if LNext.Compare(LPair.Key, not THorseCore.CaseSensitive) or (LPair.Key = '*') then
+    if LPair.Value.MatchesPart(LNext) or (LPair.Key = '*') then
     begin
       LNextRoute := LPair.Value;
       LFound := True;
@@ -706,6 +708,9 @@ begin
   begin
     LRawPart := APath.Dequeue;
     FPart := LRawPart;
+{$IF SizeOf(Char) > 1}
+    FPartBytes := TEncoding.UTF8.GetBytes(FPart);
+{$ENDIF}
 
     FIsOptional := False;
     FIsRouterRegex := False;
@@ -868,6 +873,9 @@ begin
   begin
     LRawPart := APath.Dequeue;
     FPart := LRawPart;
+{$IF SizeOf(Char) > 1}
+    FPartBytes := TEncoding.UTF8.GetBytes(FPart);
+{$ENDIF}
     FIsParamsKey := FPart.StartsWith(':');
     if FIsParamsKey then
     begin

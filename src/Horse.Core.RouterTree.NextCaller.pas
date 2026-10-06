@@ -113,7 +113,7 @@ begin
         raise;
       if E is EHorseException then
       begin
-        LNextCaller.FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
+        LNextCaller.FResponse.ContentType('application/json; charset=UTF-8').Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
         Exit;
       end;
       if THorse.HasOnError then
@@ -188,7 +188,8 @@ begin
   begin
     for LTag in FTags do
     begin
-      FRequest.Params.Dictionary.AddOrSetValue(LTag, DecodeParam(LCurrentStr));
+      FRequest.Params.Dictionary.AddOrSetValue(LTag,
+        FRequest.DecodePathParam(LCurrentStr));
     end;
   end;
 end;
@@ -261,7 +262,7 @@ begin
                     raise;
                   if E is EHorseException then
                   begin
-                    FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
+                    FResponse.ContentType('application/json; charset=UTF-8').Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
                     Exit;
                   end;
                   if THorse.HasOnError then
@@ -296,7 +297,7 @@ begin
                 raise;
               if E is EHorseException then
               begin
-                FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
+                FResponse.ContentType('application/json; charset=UTF-8').Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
                 Exit;
               end;
               if THorse.HasOnError then

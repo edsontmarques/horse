@@ -38,6 +38,9 @@ type
   TRadixNode = class
   public
     Part: string;
+{$IF SizeOf(Char) > 1}
+    PartBytes: TArray<Byte>;
+{$ENDIF}
     IsParam: Boolean;
     ParamName: string;
     IsOptional: Boolean;
@@ -77,9 +80,6 @@ type
     function FindNode(const ASegments: TArray<THorseBufferSlice>; AIndex: Integer; ANode: TRadixNode;
       const AHTTPType: TMethodType; var AMiddlewares: TList<THorseCallback>; var AParams: TDictionary<string, string>): TRadixNode;
     procedure InsertRoute(const APath: string; const AHTTPType: TMethodType; const ACallback: THorseCallback; const AIsMiddleware: Boolean);
-  protected
-    function _AddRef: Integer; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
-    function _Release: Integer; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
   public
     constructor Create;
     destructor Destroy; override;
@@ -110,13 +110,18 @@ uses
 
 {$IFDEF FPC}
 function StringToBytes(const AStr: string): TBytes;
+{$IF SizeOf(Char) = 1}
 var
   I: Integer;
+{$ENDIF}
 begin
-  Result := Default(TBytes);
+{$IF SizeOf(Char) = 1}
   SetLength(Result, Length(AStr));
   for I := 1 to Length(AStr) do
     Result[I - 1] := Byte(AStr[I]);
+{$ELSE}
+  Result := TEncoding.UTF8.GetBytes(AStr);
+{$ENDIF}
 end;
 {$ENDIF}
 
@@ -166,6 +171,12 @@ begin
   GCurrentNext();
 end;
 
+procedure RadixExecutorDoPreValidation(Req: THorseRequest; Res: THorseResponse;
+  Next: TNextProc);
+begin
+  TRadixExecutor(GCurrentExecutor).DoPreValidation(Req, Res, Next);
+end;
+
 constructor TRadixExecutor.Create(ARouter: THorseRadixRouter; AReq: THorseRequest; ARes: THorseResponse);
 begin
   FRouter := ARouter;
@@ -177,9 +188,13 @@ end;
 function TRadixExecutor.Run: Boolean;
 var
   LStopwatch: TStopwatch;
+  LPreviousExecutor: Pointer;
+  LPreviousNext: TNextProc;
 begin
   LStopwatch := TStopwatch.StartNew;
   FResponse.Request := FRequest;
+  LPreviousExecutor := GCurrentExecutor;
+  LPreviousNext := GCurrentNext;
   GCurrentExecutor := Self;
   try
     try
@@ -193,9 +208,14 @@ begin
       end;
     end;
   finally
-    LStopwatch.Stop;
-    THorseCore.ExecuteOnTelemetry(FRequest, FResponse, LStopwatch.Elapsed.TotalMilliseconds);
-    THorse.ExecuteOnResponse(FRequest, FResponse);
+    try
+      LStopwatch.Stop;
+      THorseCore.ExecuteOnTelemetry(FRequest, FResponse, LStopwatch.Elapsed.TotalMilliseconds);
+      THorse.ExecuteOnResponse(FRequest, FResponse);
+    finally
+      GCurrentNext := LPreviousNext;
+      GCurrentExecutor := LPreviousExecutor;
+    end;
   end;
 end;
 
@@ -240,14 +260,15 @@ begin
       begin
         LKeys := LParams.Keys.ToArray;
         for I := 0 to Length(LKeys) - 1 do
-          FRequest.Params.Dictionary.AddOrSetValue(LKeys[I], DecodeParam(LParams.Items[LKeys[I]]));
+          FRequest.Params.Dictionary.AddOrSetValue(LKeys[I],
+            FRequest.DecodePathParam(LParams.Items[LKeys[I]]));
       end;
 
       LCallbacksList := TList<THorseCallback>.Create;
       try
         LCallbacksList.AddRange(FRouter.FGlobalMiddlewares);
         
-        LCallbacksList.Add(THorseCallback(DoPreValidation));
+        LCallbacksList.Add(Pointer(@RadixExecutorDoPreValidation));
 
         LCallbacksList.AddRange(LMiddlewares);
         
@@ -365,7 +386,7 @@ begin
           raise;
         if E is EHorseException then
         begin
-          FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
+          FResponse.ContentType('application/json; charset=UTF-8').Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
           Exit;
         end;
         if THorse.HasOnError then
@@ -390,6 +411,9 @@ var
   LCloseParenthesis: Integer;
 begin
   Part := APart;
+{$IF SizeOf(Char) > 1}
+  PartBytes := TEncoding.UTF8.GetBytes(APart);
+{$ENDIF}
   Children := TObjectList<TRadixNode>.Create(True);
   Callbacks := TDictionary<TMethodType, TArray<THorseCallback>>.Create;
   Middlewares := TList<THorseCallback>.Create;
@@ -468,16 +492,6 @@ begin
 end;
 
 { THorseRadixRouter }
-
-function THorseRadixRouter._AddRef: Integer; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
-begin
-  Result := -1;
-end;
-
-function THorseRadixRouter._Release: Integer; {$IFDEF WINDOWS}stdcall{$ELSE}cdecl{$ENDIF};
-begin
-  Result := -1;
-end;
 
 constructor THorseRadixRouter.Create;
 begin
@@ -766,7 +780,13 @@ begin
   // 1. Tenta correspondência exata via SWAR 64-bit
   for LChild in ANode.Children do
   begin
-    if (not LChild.IsParam) and (LChild.Part <> '*') and LCurrentSlice.Compare(LChild.Part, not THorseCore.CaseSensitive) then
+    if (not LChild.IsParam) and (LChild.Part <> '*') and
+{$IF SizeOf(Char) = 1}
+      LCurrentSlice.Compare(LChild.Part, not THorseCore.CaseSensitive) then
+{$ELSE}
+      LCurrentSlice.CompareBytes(LChild.PartBytes, 0, Length(LChild.PartBytes),
+        not THorseCore.CaseSensitive) then
+{$ENDIF}
     begin
       LTempNode := LChild;
       LBestMatch := FindNode(ASegments, AIndex + 1, LTempNode, AHTTPType, AMiddlewares, AParams);
@@ -881,7 +901,8 @@ begin
                   begin
                     LKeys := LParams.Keys.ToArray;
                     for I := 0 to Length(LKeys) - 1 do
-                      ARequest.Params.Dictionary.AddOrSetValue(LKeys[I], DecodeParam(LParams.Items[LKeys[I]]));
+                      ARequest.Params.Dictionary.AddOrSetValue(LKeys[I],
+                        ARequest.DecodePathParam(LParams.Items[LKeys[I]]));
                   end;
 
                   LCallbacksList := TList<THorseCallback>.Create;

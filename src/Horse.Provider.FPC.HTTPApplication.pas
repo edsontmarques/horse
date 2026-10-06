@@ -42,6 +42,7 @@ type
     class procedure DoGetModule(Sender: TObject; ARequest: TRequest; var ModuleClass: TCustomHTTPModuleClass);
     {$IF FPC_FULLVERSION >= 30301}
     class procedure EnableServerKeepAlive(const AApplication: THTTPApplication);
+    class procedure ConfigureServerTransport(const AApplication: THTTPApplication);
     {$ENDIF}
   public
     class property Host: string read GetHost write SetHost;
@@ -71,7 +72,9 @@ implementation
 uses
   Horse.WebModule,
   Horse.Response
-  {$IF FPC_FULLVERSION >= 30301}, custhttpapp{$ENDIF};
+  {$IF FPC_FULLVERSION >= 30301}, custhttpapp, fphttpserver, ssockets{$ENDIF}
+  {$IF DEFINED(FPC) AND DEFINED(UNIX)}, Sockets{$ENDIF}
+  {$IF DEFINED(FPC) AND DEFINED(MSWINDOWS)}, WinSock2{$ENDIF};
 
 {$IF FPC_FULLVERSION >= 30301}
 const
@@ -89,6 +92,66 @@ type
       from it, so the property never becomes public on it). }
   THorseHTTPServerHandlerAccess = class(custhttpapp.TFPHTTPServerHandler);
   THorseEmbeddedServerAccess = class(custhttpapp.TEmbeddedHttpServer);
+
+  {$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+  THorseNoDelaySocketHandler = class(TSocketHandler)
+  public
+    function Accept: Boolean; override;
+  end;
+
+  THorseSocketHandlerFactory = class
+  private
+    FPrevious: TGetSocketHandlerEvent;
+  public
+    procedure CreateHandler(Sender: TObject; const UseSSL: Boolean;
+      out AHandler: TSocketHandler);
+    property Previous: TGetSocketHandlerEvent read FPrevious write FPrevious;
+  end;
+  {$IFEND}
+
+{$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+var
+  GSocketHandlerFactory: THorseSocketHandlerFactory;
+  GConfiguredSocketServer: TEmbeddedHttpServer;
+{$IFEND}
+
+{$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+function THorseNoDelaySocketHandler.Accept: Boolean;
+var
+  LEnabled: LongInt;
+begin
+  Result := inherited Accept;
+  if not Result then
+    Exit;
+
+  LEnabled := 1;
+  { fphttpserver writes the response headers and body separately. Leaving
+    Nagle enabled makes the second small write interact with delayed ACK and
+    adds latency to reused HTTP/1.1 connections. Accept is the first handler
+    callback invoked after TSocketStream associates the raw socket, so the
+    descriptor is valid here. }
+  {$IFDEF UNIX}
+  Sockets.fpSetSockOpt(Socket.Handle, Sockets.IPPROTO_TCP,
+    Sockets.TCP_NODELAY, @LEnabled, SizeOf(LEnabled));
+  {$ELSE}
+  WinSock2.setsockopt(WinSock2.TSocket(Socket.Handle), WinSock2.IPPROTO_TCP,
+    WinSock2.TCP_NODELAY, PAnsiChar(@LEnabled), SizeOf(LEnabled));
+  {$ENDIF}
+end;
+
+procedure THorseSocketHandlerFactory.CreateHandler(Sender: TObject;
+  const UseSSL: Boolean; out AHandler: TSocketHandler);
+begin
+  AHandler := nil;
+  if Assigned(FPrevious) then
+    FPrevious(Sender, UseSSL, AHandler);
+
+  { Do not replace custom or TLS handlers. The default non-TLS handler is the
+    only path affected by the two-small-writes delayed-ACK regression. }
+  if (AHandler = nil) and not UseSSL then
+    AHandler := THorseNoDelaySocketHandler.Create;
+end;
+{$IFEND}
 
 class procedure THorseProvider.EnableServerKeepAlive(const AApplication: THTTPApplication);
 var
@@ -119,6 +182,35 @@ begin
     if THorseEmbeddedServerAccess(LServer).KeepConnectionTimeout <= 0 then
       THorseEmbeddedServerAccess(LServer).KeepConnectionTimeout := DEFAULT_KEEPALIVE_TIMEOUT_MS;
   end;
+end;
+
+class procedure THorseProvider.ConfigureServerTransport(
+  const AApplication: THTTPApplication);
+{$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+var
+  LHandler: TFPHTTPServerHandler;
+  LServer: TEmbeddedHttpServer;
+{$IFEND}
+begin
+  {$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+  LHandler := AApplication.HTTPHandler;
+  if LHandler = nil then
+    Exit;
+  LServer := THorseHTTPServerHandlerAccess(LHandler).HTTPServer;
+  if (LServer = nil) or (LServer = GConfiguredSocketServer) then
+    Exit;
+
+  if GSocketHandlerFactory = nil then
+    GSocketHandlerFactory := THorseSocketHandlerFactory.Create;
+  { Do not use OnAllowConnect here. FPC 3.3.1 stores that callback but its
+    DoOnAllowConnect implementation does not dispatch it. A socket-handler
+    factory is both effective and early enough to configure accepted sockets. }
+  GSocketHandlerFactory.Previous :=
+    THorseEmbeddedServerAccess(LServer).OnGetSocketHandler;
+  THorseEmbeddedServerAccess(LServer).OnGetSocketHandler :=
+    GSocketHandlerFactory.CreateHandler;
+  GConfiguredSocketServer := LServer;
+  {$IFEND}
 end;
 {$ENDIF}
 
@@ -198,6 +290,7 @@ begin
     and before Run, while the server is fully configured but not yet
     accepting. }
   EnableServerKeepAlive(LHTTPApplication);
+  ConfigureServerTransport(LHTTPApplication);
   {$ENDIF}
   FRunning := True;
   DoOnListen;
