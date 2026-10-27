@@ -96,13 +96,39 @@ var
   LNextCaller: TNextCaller;
 begin
   LNextCaller := TNextCaller(GCurrentNextCaller);
-  LNextCaller.FFound^ := True;
-  if LNextCaller.FCallBack.TryGetValue(LNextCaller.FHTTPType, LCallback) then
-  begin
-    THorseCallbackProc(LCallback.Items[LNextCaller.FIndexCallback])(LNextCaller.FRequest, LNextCaller.FResponse, LNextCaller.Next);
+  try
+    LNextCaller.FFound^ := True;
+    if LNextCaller.FCallBack.TryGetValue(LNextCaller.FHTTPType, LCallback) then
+    begin
+      {$IF DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+      LCallback.Items[LNextCaller.FIndexCallback](LNextCaller.FRequest, LNextCaller.FResponse, LNextCaller.Next);
+      {$ELSE}
+      THorseCallbackProc(LCallback.Items[LNextCaller.FIndexCallback])(LNextCaller.FRequest, LNextCaller.FResponse, LNextCaller.Next);
+      {$ENDIF}
+    end;
+  except
+    on E: Exception do
+    begin
+      if E is EHorseCallbackInterrupted then
+        raise;
+      if E is EHorseException then
+      begin
+        LNextCaller.FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
+        Exit;
+      end;
+      if THorse.HasOnError then
+      begin
+        THorse.ExecuteOnError(LNextCaller.FRequest, LNextCaller.FResponse, E);
+        Exit;
+      end;
+      if LNextCaller.FResponse.Status < Integer(THTTPStatus.BadRequest) then
+        LNextCaller.FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
+      Exit;
+    end;
   end;
   LNextCaller.Next;
 end;
+
 {$ENDIF}
 
 procedure TNextCaller.Configure(
@@ -227,24 +253,64 @@ begin
           THorse.ExecutePreValidation(FRequest, FResponse,
             procedure
             begin
-              FFound^ := True;
-              {$IF DEFINED(FPC)}
-              THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
-              {$ELSE}
-              LCallback[FIndexCallback](FRequest, FResponse, Next);
-              {$ENDIF}
+              try
+                FFound^ := True;
+                LCallback[FIndexCallback](FRequest, FResponse, Next);
+              except
+                on E: Exception do
+                begin
+                  if E is EHorseCallbackInterrupted then
+                    raise;
+                  if E is EHorseException then
+                  begin
+                    FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
+                    Exit;
+                  end;
+                  if THorse.HasOnError then
+                  begin
+                    THorse.ExecuteOnError(FRequest, FResponse, E);
+                    Exit;
+                  end;
+                  if FResponse.Status < Integer(THTTPStatus.BadRequest) then
+                    FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
+                  Exit;
+                end;
+              end;
               Next;
             end);
           {$ENDIF}
         end
         else
         begin
-          FFound^ := True;
-          {$IF DEFINED(FPC)}
-          THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
-          {$ELSE}
-          LCallback[FIndexCallback](FRequest, FResponse, Next);
-          {$ENDIF}
+          try
+            FFound^ := True;
+            {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+            THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
+            {$ELSEIF DEFINED(FPC)}
+            LCallback.Items[FIndexCallback](FRequest, FResponse, Next);
+            {$ELSE}
+            LCallback[FIndexCallback](FRequest, FResponse, Next);
+            {$ENDIF}
+          except
+            on E: Exception do
+            begin
+              if E is EHorseCallbackInterrupted then
+                raise;
+              if E is EHorseException then
+              begin
+                FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
+                Exit;
+              end;
+              if THorse.HasOnError then
+              begin
+                THorse.ExecuteOnError(FRequest, FResponse, E);
+                Exit;
+              end;
+              if FResponse.Status < Integer(THTTPStatus.BadRequest) then
+                FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
+              Exit;
+            end;
+          end;
           Next;
         end;
       end;
