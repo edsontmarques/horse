@@ -4,6 +4,8 @@ unit Horse.Instance;
   {$MODE DELPHI}{$H+}
 {$ENDIF}
 
+{$I Horse.FunctionReferences.inc}
+
 interface
 
 uses
@@ -351,7 +353,7 @@ begin
   if (FCallbacks <> nil) and (FIndex < FCallbacks.Count) then
   begin
     {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
-    THorseCallbackProc(FCallbacks.Items[FIndex])(FRequest, FResponse, Next);
+    THorseCallbackProc(FCallbacks[FIndex])(FRequest, FResponse, Next);
     {$ELSEIF DEFINED(FPC)}
     FCallbacks.Items[FIndex](FRequest, FResponse, Next);
     {$ELSE}
@@ -1411,7 +1413,7 @@ begin
 end;
 
 // Callback converters
-{$IF DEFINED(FPC)}
+{$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
 function THorseInstance.GetCallback(const ACallbackRequest: THorseCallbackRequestResponse): THorseCallback;
 begin
   Result := THorseCallback(ACallbackRequest);
@@ -1440,6 +1442,7 @@ begin
     end;
 end;
 
+{$IFNDEF FPC}
 function THorseInstance.GetCallback(const ACallbackResponse: THorseCallbackResponse): THorseCallback;
 begin
   Result := procedure(AReq: THorseRequest; ARes: THorseResponse; ANext: TNextProc)
@@ -1448,6 +1451,8 @@ begin
       ANext();
     end;
 end;
+{$ENDIF}
+
 {$ENDIF}
 
 // Controle de Escuta física delegando para a fachada THorse

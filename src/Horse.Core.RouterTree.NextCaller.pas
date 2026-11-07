@@ -4,6 +4,8 @@ unit Horse.Core.RouterTree.NextCaller;
   {$MODE DELPHI}{$H+}
 {$ENDIF}
 
+{$I Horse.FunctionReferences.inc}
+
 interface
 
 uses
@@ -18,6 +20,7 @@ uses
   Horse.Request,
   Horse.Response,
   Horse.Callback,
+  Horse.Proc,
   Horse.Commons;
 
 type
@@ -94,41 +97,26 @@ procedure NextCallerDoPreValidation;
 var
   LCallback: TList<THorseCallback>;
   LNextCaller: TNextCaller;
+  {$IF DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+  LNext: TNextProc;
+  {$ENDIF}
 begin
   LNextCaller := TNextCaller(GCurrentNextCaller);
-  try
-    LNextCaller.FFound^ := True;
-    if LNextCaller.FCallBack.TryGetValue(LNextCaller.FHTTPType, LCallback) then
-    begin
-      {$IF DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
-      LCallback.Items[LNextCaller.FIndexCallback](LNextCaller.FRequest, LNextCaller.FResponse, LNextCaller.Next);
-      {$ELSE}
-      THorseCallbackProc(LCallback.Items[LNextCaller.FIndexCallback])(LNextCaller.FRequest, LNextCaller.FResponse, LNextCaller.Next);
-      {$ENDIF}
-    end;
-  except
-    on E: Exception do
-    begin
-      if E is EHorseCallbackInterrupted then
-        raise;
-      if E is EHorseException then
+  LNextCaller.FFound^ := True;
+  if LNextCaller.FCallBack.TryGetValue(LNextCaller.FHTTPType, LCallback) then
+  begin
+    {$IF DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+    LNext := procedure
       begin
-        LNextCaller.FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
-        Exit;
+        LNextCaller.Next;
       end;
-      if THorse.HasOnError then
-      begin
-        THorse.ExecuteOnError(LNextCaller.FRequest, LNextCaller.FResponse, E);
-        Exit;
-      end;
-      if LNextCaller.FResponse.Status < Integer(THTTPStatus.BadRequest) then
-        LNextCaller.FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
-      Exit;
-    end;
+    LCallback.Items[LNextCaller.FIndexCallback](LNextCaller.FRequest, LNextCaller.FResponse, LNext);
+    {$ELSE}
+    THorseCallbackProc(LCallback.Items[LNextCaller.FIndexCallback])(LNextCaller.FRequest, LNextCaller.FResponse, LNextCaller.Next);
+    {$ENDIF}
   end;
   LNextCaller.Next;
 end;
-
 {$ENDIF}
 
 procedure TNextCaller.Configure(
@@ -219,15 +207,15 @@ begin
   if (LMiddlewareCount > FIndex) then
   begin
     FFound^ := True;
-    {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
-    THorseCallbackProc(Self.FMiddleware.Items[FIndex])(FRequest, FResponse, Next);
-    {$ELSEIF DEFINED(FPC)}
+    {$IF DEFINED(FPC)}
+    {$IF DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
     Self.FMiddleware.Items[FIndex](FRequest, FResponse, Next);
     {$ELSE}
-    Self.FMiddleware[FIndex](FRequest, FResponse, Next);
+    THorseCallbackProc(Self.FMiddleware.Items[FIndex])(FRequest, FResponse, Next);
     {$ENDIF}
-    {$IF DEFINED(FPC)}
     LMiddlewareCount := FMiddleware.Count;
+    {$ELSE}
+    Self.FMiddleware[FIndex](FRequest, FResponse, Next);
     {$ENDIF}
   end
   else if (FIndexSegment = Length(FSegments)) and Assigned(FCallBack) then
@@ -245,72 +233,32 @@ begin
         if FIndexCallback = 0 then
         begin
           {$IF DEFINED(FPC)}
-          // FPC (com ou sem funcref): usa procedure global + threadvar para evitar
-          // o Internal Error 2022110601 do FPC ao capturar closures aninhadas.
           GCurrentNextCaller := Self;
           THorse.ExecutePreValidation(FRequest, FResponse, NextCallerDoPreValidation);
           {$ELSE}
           THorse.ExecutePreValidation(FRequest, FResponse,
             procedure
             begin
-              try
-                FFound^ := True;
-                LCallback[FIndexCallback](FRequest, FResponse, Next);
-              except
-                on E: Exception do
-                begin
-                  if E is EHorseCallbackInterrupted then
-                    raise;
-                  if E is EHorseException then
-                  begin
-                    FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
-                    Exit;
-                  end;
-                  if THorse.HasOnError then
-                  begin
-                    THorse.ExecuteOnError(FRequest, FResponse, E);
-                    Exit;
-                  end;
-                  if FResponse.Status < Integer(THTTPStatus.BadRequest) then
-                    FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
-                  Exit;
-                end;
-              end;
+              FFound^ := True;
+              {$IF DEFINED(FPC)}
+              THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
+              {$ELSE}
+              LCallback[FIndexCallback](FRequest, FResponse, Next);
+              {$ENDIF}
               Next;
             end);
           {$ENDIF}
         end
         else
         begin
-          try
-            FFound^ := True;
-            {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
-            THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
-            {$ELSEIF DEFINED(FPC)}
-            LCallback.Items[FIndexCallback](FRequest, FResponse, Next);
-            {$ELSE}
-            LCallback[FIndexCallback](FRequest, FResponse, Next);
-            {$ENDIF}
-          except
-            on E: Exception do
-            begin
-              if E is EHorseCallbackInterrupted then
-                raise;
-              if E is EHorseException then
-              begin
-                FResponse.Send(EHorseException(E).ToJSON).Status(EHorseException(E).Status);
-                Exit;
-              end;
-              if THorse.HasOnError then
-              begin
-                THorse.ExecuteOnError(FRequest, FResponse, E);
-                Exit;
-              end;
-              if FResponse.Status < Integer(THTTPStatus.BadRequest) then
-                FResponse.Send('Internal Application Error: ' + E.Message).Status(THTTPStatus.InternalServerError);
-              Exit;
-            end;
-          end;
+          FFound^ := True;
+          {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
+          THorseCallbackProc(LCallback.Items[FIndexCallback])(FRequest, FResponse, Next);
+          {$ELSEIF DEFINED(FPC)}
+          LCallback.Items[FIndexCallback](FRequest, FResponse, Next);
+          {$ELSE}
+          LCallback[FIndexCallback](FRequest, FResponse, Next);
+          {$ENDIF}
           Next;
         end;
       end;
