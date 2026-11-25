@@ -28,6 +28,8 @@ type
     class var FRunning: Boolean;
     class var FListenQueue: Integer;
     class var FHTTPApplication: THTTPApplication;
+    class var FStopRequested: LongInt;
+    class var FStopFinished: LongInt;
     class function GetDefaultHTTPApplication: THTTPApplication;
     class function HTTPApplicationIsNil: Boolean;
     class procedure SetListenQueue(const AValue: Integer); static;
@@ -40,8 +42,12 @@ type
     class function GetHost: string; static;
     class procedure InternalListen; virtual;
     class procedure DoGetModule(Sender: TObject; ARequest: TRequest; var ModuleClass: TCustomHTTPModuleClass);
+    class procedure DoAcceptIdle(Sender: TObject);
+    class function StopIsRequested: Boolean;
+    class procedure StopAccepting(const AApplication: THTTPApplication);
     {$IF FPC_FULLVERSION >= 30301}
     class procedure EnableServerKeepAlive(const AApplication: THTTPApplication);
+    class procedure ConfigureServerTransport(const AApplication: THTTPApplication);
     {$ENDIF}
   public
     class property Host: string read GetHost write SetHost;
@@ -60,6 +66,8 @@ type
     // PATCH-FPCHTTP-1
     class procedure ListenWithConfig(const APort: Integer;
       const AConfig: THorseCrossSocketConfig); override;
+    class procedure StopListen; override;
+    class procedure StopListenGraceful(const ATimeoutMS: Integer); override;
     class function IsRunning: Boolean;
   end;
 {$ENDIF}
@@ -70,8 +78,23 @@ implementation
 
 uses
   Horse.WebModule,
+  Horse.Core,
   Horse.Response
-  {$IF FPC_FULLVERSION >= 30301}, custhttpapp{$ENDIF};
+  {$IF FPC_FULLVERSION >= 30301}, custhttpapp, fphttpserver, ssockets{$ENDIF}
+  {$IF DEFINED(FPC) AND DEFINED(UNIX)}, Sockets{$ENDIF}
+  {$IF DEFINED(FPC) AND DEFINED(MSWINDOWS)}, WinSock2{$ENDIF};
+
+const
+  { STOP-FPCHTTP-1 — the accept loop wakes up this often while idle, so a stop
+    requested before Run starts accepting (Terminate cannot break an accept loop
+    that has not started yet) is still honoured on the next idle tick. }
+  STOP_ACCEPT_IDLE_MS = 100;
+  STOP_DRAIN_POLL_MS = 50;
+  { Listen polls the end of the drain instead of waiting on an OS event: an
+    event created at unit initialization would break programs that never
+    stop the server and run without a thread manager (no cthreads). }
+  STOP_FINISHED_POLL_MS = 10;
+  DEFAULT_STOP_TIMEOUT_MS = 5000;
 
 {$IF FPC_FULLVERSION >= 30301}
 const
@@ -89,6 +112,66 @@ type
       from it, so the property never becomes public on it). }
   THorseHTTPServerHandlerAccess = class(custhttpapp.TFPHTTPServerHandler);
   THorseEmbeddedServerAccess = class(custhttpapp.TEmbeddedHttpServer);
+
+  {$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+  THorseNoDelaySocketHandler = class(TSocketHandler)
+  public
+    function Accept: Boolean; override;
+  end;
+
+  THorseSocketHandlerFactory = class
+  private
+    FPrevious: TGetSocketHandlerEvent;
+  public
+    procedure CreateHandler(Sender: TObject; const UseSSL: Boolean;
+      out AHandler: TSocketHandler);
+    property Previous: TGetSocketHandlerEvent read FPrevious write FPrevious;
+  end;
+  {$IFEND}
+
+{$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+var
+  GSocketHandlerFactory: THorseSocketHandlerFactory;
+  GConfiguredSocketServer: TEmbeddedHttpServer;
+{$IFEND}
+
+{$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+function THorseNoDelaySocketHandler.Accept: Boolean;
+var
+  LEnabled: LongInt;
+begin
+  Result := inherited Accept;
+  if not Result then
+    Exit;
+
+  LEnabled := 1;
+  { fphttpserver writes the response headers and body separately. Leaving
+    Nagle enabled makes the second small write interact with delayed ACK and
+    adds latency to reused HTTP/1.1 connections. Accept is the first handler
+    callback invoked after TSocketStream associates the raw socket, so the
+    descriptor is valid here. }
+  {$IFDEF UNIX}
+  Sockets.fpSetSockOpt(Socket.Handle, Sockets.IPPROTO_TCP,
+    Sockets.TCP_NODELAY, @LEnabled, SizeOf(LEnabled));
+  {$ELSE}
+  WinSock2.setsockopt(WinSock2.TSocket(Socket.Handle), WinSock2.IPPROTO_TCP,
+    WinSock2.TCP_NODELAY, PAnsiChar(@LEnabled), SizeOf(LEnabled));
+  {$ENDIF}
+end;
+
+procedure THorseSocketHandlerFactory.CreateHandler(Sender: TObject;
+  const UseSSL: Boolean; out AHandler: TSocketHandler);
+begin
+  AHandler := nil;
+  if Assigned(FPrevious) then
+    FPrevious(Sender, UseSSL, AHandler);
+
+  { Do not replace custom or TLS handlers. The default non-TLS handler is the
+    only path affected by the two-small-writes delayed-ACK regression. }
+  if (AHandler = nil) and not UseSSL then
+    AHandler := THorseNoDelaySocketHandler.Create;
+end;
+{$IFEND}
 
 class procedure THorseProvider.EnableServerKeepAlive(const AApplication: THTTPApplication);
 var
@@ -119,6 +202,35 @@ begin
     if THorseEmbeddedServerAccess(LServer).KeepConnectionTimeout <= 0 then
       THorseEmbeddedServerAccess(LServer).KeepConnectionTimeout := DEFAULT_KEEPALIVE_TIMEOUT_MS;
   end;
+end;
+
+class procedure THorseProvider.ConfigureServerTransport(
+  const AApplication: THTTPApplication);
+{$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+var
+  LHandler: TFPHTTPServerHandler;
+  LServer: TEmbeddedHttpServer;
+{$IFEND}
+begin
+  {$IF DEFINED(UNIX) or DEFINED(MSWINDOWS)}
+  LHandler := AApplication.HTTPHandler;
+  if LHandler = nil then
+    Exit;
+  LServer := THorseHTTPServerHandlerAccess(LHandler).HTTPServer;
+  if (LServer = nil) or (LServer = GConfiguredSocketServer) then
+    Exit;
+
+  if GSocketHandlerFactory = nil then
+    GSocketHandlerFactory := THorseSocketHandlerFactory.Create;
+  { Do not use OnAllowConnect here. FPC 3.3.1 stores that callback but its
+    DoOnAllowConnect implementation does not dispatch it. A socket-handler
+    factory is both effective and early enough to configure accepted sockets. }
+  GSocketHandlerFactory.Previous :=
+    THorseEmbeddedServerAccess(LServer).OnGetSocketHandler;
+  THorseEmbeddedServerAccess(LServer).OnGetSocketHandler :=
+    GSocketHandlerFactory.CreateHandler;
+  GConfiguredSocketServer := LServer;
+  {$IFEND}
 end;
 {$ENDIF}
 
@@ -198,10 +310,102 @@ begin
     and before Run, while the server is fully configured but not yet
     accepting. }
   EnableServerKeepAlive(LHTTPApplication);
+  ConfigureServerTransport(LHTTPApplication);
   {$ENDIF}
+  { STOP-FPCHTTP-1 — with a positive idle timeout the accept loop polls
+    DoAcceptIdle, which stops accepting once a stop was requested. }
+  LHTTPApplication.AcceptIdleTimeout := STOP_ACCEPT_IDLE_MS;
+  LHTTPApplication.OnAcceptIdle := DoAcceptIdle;
   FRunning := True;
   DoOnListen;
-  LHTTPApplication.Run;
+  try
+    if not StopIsRequested then
+      LHTTPApplication.Run;
+
+    { Run returns as soon as the accept loop ends; Listen only returns after
+      StopListenGraceful finished draining, so callers that exit right after
+      Listen do not race the drain. }
+    if StopIsRequested then
+      while InterlockedCompareExchange(FStopFinished, 0, 0) = 0 do
+        Sleep(STOP_FINISHED_POLL_MS);
+  finally
+    FRunning := False;
+    InterlockedExchange(FStopFinished, 0);
+    InterlockedExchange(FStopRequested, 0);
+  end;
+end;
+
+class function THorseProvider.StopIsRequested: Boolean;
+begin
+  Result := InterlockedCompareExchange(FStopRequested, 0, 0) <> 0;
+end;
+
+class procedure THorseProvider.DoAcceptIdle(Sender: TObject);
+begin
+  if StopIsRequested then
+    StopAccepting(GetDefaultHTTPApplication);
+end;
+
+class procedure THorseProvider.StopAccepting(const AApplication: THTTPApplication);
+{$IF FPC_FULLVERSION >= 30301}
+var
+  LHandler: TFPHTTPServerHandler;
+  LServer: TEmbeddedHttpServer;
+{$ENDIF}
+begin
+  { Terminate marks the application so Run leaves its loop. It reaches the
+    handler (and the server) only the first time, so a call made before Run
+    starts accepting would be lost: the embedded server is also switched off
+    directly, which is what the idle guard relies on. }
+  AApplication.Terminate;
+  {$IF FPC_FULLVERSION >= 30301}
+  LHandler := AApplication.HTTPHandler;
+  if LHandler <> nil then
+  begin
+    LServer := THorseHTTPServerHandlerAccess(LHandler).HTTPServer;
+    if LServer <> nil then
+    begin
+      { Idle keep-alive connections re-read KeepConnections on every loop and
+        leave within the idle poll instead of holding the stop for the whole
+        keep-alive window; requests in flight are not cut. }
+      THorseEmbeddedServerAccess(LServer).KeepConnections := False;
+      LServer.Active := False;
+    end;
+  end;
+  {$ENDIF}
+end;
+
+class procedure THorseProvider.StopListen;
+begin
+  StopListenGraceful(DEFAULT_STOP_TIMEOUT_MS);
+end;
+
+class procedure THorseProvider.StopListenGraceful(const ATimeoutMS: Integer);
+var
+  LStart: QWord;
+begin
+  { STOP-FPCHTTP-1 — documented order (doc/graceful-shutdown.md): mark the
+    shutdown, stop listening, drain the active requests up to ATimeoutMS, then
+    release Listen. A stop requested before Listen reaches Run makes Listen
+    return without serving; a second call is a no-op. }
+  if InterlockedExchange(FStopRequested, 1) <> 0 then
+    Exit;
+
+  TriggerBeforeStop;
+  THorseCore.SetIsShuttingDown(True);
+  try
+    if not HTTPApplicationIsNil then
+      StopAccepting(GetDefaultHTTPApplication);
+
+    LStart := GetTickCount64;
+    while (GetDrainActiveRequests > 0) and (GetTickCount64 - LStart < QWord(ATimeoutMS)) do
+      Sleep(STOP_DRAIN_POLL_MS);
+
+    DoOnStopListen;
+  finally
+    THorseCore.SetIsShuttingDown(False);
+    InterlockedExchange(FStopFinished, 1);
+  end;
 end;
 
 class procedure THorseProvider.DoGetModule(Sender: TObject; ARequest: TRequest; var ModuleClass: TCustomHTTPModuleClass);
@@ -247,6 +451,7 @@ end;
 class procedure THorseProvider.ListenWithConfig(const APort: Integer;
   const AConfig: THorseCrossSocketConfig);
 begin
+  ValidateNoUnsupportedTls(AConfig, 'FPC.HTTPApplication');
   SetPort(APort);
   InternalListen;
 end;

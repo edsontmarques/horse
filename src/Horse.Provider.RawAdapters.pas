@@ -29,6 +29,10 @@ unit Horse.Provider.RawAdapters;
   {$MODE DELPHI}{$H+}
 {$ENDIF}
 
+{$IF DEFINED(HORSE_APACHE) or DEFINED(HORSE_ISAPI) or DEFINED(HORSE_CGI) or DEFINED(HORSE_FCGI)}
+  {$MESSAGE FATAL 'Horse.Provider.RawAdapters is for self-hosted providers and must not be linked into Apache, ISAPI, CGI, or FastCGI applications.'}
+{$IFEND}
+
 interface
 
 uses
@@ -80,6 +84,7 @@ type
   TInterfacedWebRequest = class(TWebRequest)
   private
     FRawReq: IHorseRawRequest;
+    FInitializingQueryFields: Boolean;
   protected
     function  GetStringVariable(Index: Integer): TWebString; override;
     function  GetDateVariable(Index: Integer): TDateTime; override;
@@ -192,7 +197,30 @@ const
 { TInterfacedWebRequest                                                       }
 { --------------------------------------------------------------------------- }
 
+{ [FIX-RAWFIELDS-1] True when the media type IS a form body.
+
+  Compares the media type EXACTLY, after stripping any parameters, rather than
+  searching for a substring. Pos('application/x-www-form-urlencoded', ...) also
+  matches 'x-application/x-www-form-urlencoded', 'multipart/form-data-x', and any
+  header that merely MENTIONS the token inside a parameter - each of which would send
+  a non-form body straight back down the parsing path this guard exists to avoid. }
+function IsFormMediaType(const AContentType: string): Boolean;
+var
+  LMedia: string;
+  LSemicolon: Integer;
+begin
+  LMedia := AContentType;
+  LSemicolon := Pos(';', LMedia);
+  if LSemicolon > 0 then
+    LMedia := Copy(LMedia, 1, LSemicolon - 1);
+  LMedia := LowerCase(Trim(LMedia));
+  Result := (LMedia = 'application/x-www-form-urlencoded') or
+            (LMedia = 'multipart/form-data');
+end;
+
 constructor TInterfacedWebRequest.Create(const ARawReq: IHorseRawRequest);
+var
+  LQueryFields: TStrings;
 begin
   { Assign FRawReq BEFORE inherited Create — TWebRequest.Create calls
     GetStringVariable internally during initialisation. }
@@ -203,8 +231,42 @@ begin
     getter to override). }
   if Assigned(FRawReq) then
   begin
-    FRawReq.PopulateQueryFields(QueryFields);
-    FRawReq.PopulateContentFields(ContentFields);
+    { QueryFields lazily invokes WebBroker's non-virtual query parser. Let it
+      allocate an empty list, then use the raw provider's parser exactly once.
+      Otherwise malformed percent escapes can raise before dispatch, and even
+      valid fields are unnecessarily parsed twice. Keep Query itself unchanged
+      outside this narrowly scoped initialization. }
+    FInitializingQueryFields := True;
+    try
+      LQueryFields := QueryFields;
+    finally
+      FInitializingQueryFields := False;
+    end;
+    FRawReq.PopulateQueryFields(LQueryFields);
+
+    { [FIX-RAWFIELDS-1] Only touch ContentFields when the body really is form
+      data. READING this property is not free: TWebRequest.GetContentFields
+      lazily runs ExtractContentFields over Content, which splits the body,
+      strips quotes and URL-DECODES every piece. On a JSON body that is both
+      pointless and unsafe — a literal '%' in any string value raises
+      EConvertError ("Error decoding URL style (%XX) encoded string at position
+      N") from the CONSTRUCTOR, before the route or any middleware runs, so the
+      caller gets a 500 whose message names neither the request nor the field.
+
+      Reported against a live service and reproduced: a PUT whose payload held
+        "descripcion":"Impuesto al Valor Agregado 13%"
+      failed every time — 30 characters, '%' last, hence "at position 30" — while
+      the identical document without the percent sign succeeded. It presented as
+      intermittent because only documents containing a '%' fail, and as
+      provider-specific because Indy uses a real WebBroker request and never
+      reaches these adapters.
+
+      Skipping costs nothing: every provider's PopulateContentFields is already
+      gated on a form body and adds nothing otherwise, so this removes only work
+      that had no effect. }
+    if IsFormMediaType(FRawReq.GetContentType) then
+      FRawReq.PopulateContentFields(ContentFields);
+
     FRawReq.PopulateCookieFields(CookieFields);
   end;
 end;
@@ -222,7 +284,11 @@ begin
     HRV_Method:           Result := FRawReq.GetMethod;
     HRV_ProtocolVersion:  Result := FRawReq.GetProtocolVersion;
     HRV_URL:              Result := FRawReq.GetURL;
-    HRV_Query:            Result := FRawReq.GetQueryString;
+    HRV_Query:
+      if FInitializingQueryFields then
+        Result := ''
+      else
+        Result := FRawReq.GetQueryString;
     HRV_PathInfo:         Result := FRawReq.GetPathInfo;
     HRV_PathTranslated:   Result := FRawReq.GetPathInfo;
     HRV_CacheControl:     Result := FRawReq.GetFieldByName('Cache-Control');
@@ -244,7 +310,15 @@ begin
     HRV_RemoteHost:       Result := FRawReq.GetRemoteAddr;
     HRV_ScriptName:       Result := '';
     HRV_ServerPort:       Result := IntToStr(FRawReq.GetServerPort);
-    HRV_Content:          Result := FRawReq.GetContent;
+    HRV_Content:
+{$IF CompilerVersion < 32.0}
+      // Legacy WebBroker decodes this byte string using Content-Type. Preserve
+      // that encoding instead of implicitly converting Unicode to ANSI first.
+      Result := StringOf(EncodingGetBytes(AnsiString(FRawReq.GetContentType),
+        FRawReq.GetContent));
+{$ELSE}
+      Result := FRawReq.GetContent;
+{$IFEND}
     HRV_Connection:       Result := FRawReq.GetFieldByName('Connection');
     HRV_Cookie:           Result := FRawReq.GetFieldByName('Cookie');
     HRV_Authorization:    Result := FRawReq.GetFieldByName('Authorization');

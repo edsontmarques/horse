@@ -64,7 +64,9 @@ uses
   IdCustomHTTPServer,
   System.SysUtils,
 {$ENDIF}
+{$IF DEFINED(HORSE_PROVIDER_EPOLL) or DEFINED(HORSE_PROVIDER_IOCP) or DEFINED(HORSE_PROVIDER_HTTPSYS)}
   Horse.Provider.RawAdapters,
+{$IFEND}
   Horse.Rtti;
 
 {$IF DEFINED(FPC)}
@@ -88,7 +90,8 @@ begin
     LChar := Value[I];
     if LChar in ['A'..'Z'] then
       Inc(LChar, 32);
-    Result := LongWord((((QWord(Result) shl 5) + QWord(Result)) + Ord(LChar)) and High(LongWord));
+    // DJB2 wraps modulo 2^32; keep the intermediate and conversion in range.
+    Result := DWord((QWord(Result) * 33 + Ord(LChar)) and QWord($FFFFFFFF));
   end;
 end;
 {$ENDIF}
@@ -136,12 +139,15 @@ var
 begin
   Result := TStringList.create;
   try
+    {$IF DEFINED(HORSE_PROVIDER_EPOLL)}
     if AWebRequest is TInterfacedWebRequest then
     begin
       Result.NameValueSeparator := '=';
       TInterfacedWebRequest(AWebRequest).RawReq.PopulateHeaders(Result);
     end
-    else if AWebRequest is TFPHTTPConnectionRequest then
+    else
+    {$IFEND}
+    if AWebRequest is TFPHTTPConnectionRequest then
     begin
       LRequest := TFPHTTPConnectionRequest(AWebRequest);
       Result.NameValueSeparator := '=';
@@ -178,11 +184,13 @@ begin
   try
     Result.NameValueSeparator := ':';
 
+{$IF DEFINED(HORSE_PROVIDER_EPOLL) or DEFINED(HORSE_PROVIDER_IOCP) or DEFINED(HORSE_PROVIDER_HTTPSYS)}
     if AWebRequest is TInterfacedWebRequest then
     begin
       TInterfacedWebRequest(AWebRequest).RawReq.PopulateHeaders(Result);
       Exit;
     end;
+{$IFEND}
 
 {$IF DEFINED(HORSE_ISAPI)}
     Result.Text := AWebRequest.GetFieldByName('ALL_RAW');

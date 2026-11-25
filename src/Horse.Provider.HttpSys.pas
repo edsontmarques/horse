@@ -462,6 +462,7 @@ type
     class var FReqQueue: THandle;
     class var FCompletionPort: THandle;
     class var FListenerThreads: TList<THttpSysListenerThread>;
+    class var FPendingReceives: TList<PHttpSysOverlapped>;
     class var FKnownRequestHeadersMap: TDictionary<string, Integer>;
     class var FKnownResponseHeadersMap: TDictionary<string, Integer>;
     class var FBufferPool: THttpSysBufferPool;
@@ -476,6 +477,7 @@ type
     class procedure InternalListen;
     class procedure InternalStopListen;
     class procedure PostNewReceive(AOverlapped: PHttpSysOverlapped); static;
+    class procedure ReleasePendingReceives; static;
   public
     class property Host: string read GetHost write SetHost;
     class property Port: Integer read GetPort write SetPort;
@@ -520,6 +522,7 @@ type
   end;
 
 function QueueUserWorkItem(Func: Pointer; Context: Pointer; Flags: ULONG): BOOL; stdcall; external 'kernel32.dll' name 'QueueUserWorkItem';
+function HttpSysCancelIoEx(hFile: THandle; lpOverlapped: POverlapped): BOOL; stdcall; external 'kernel32.dll' name 'CancelIoEx';
 const
   WT_EXECUTEDEFAULT = $00000000;
 
@@ -1048,10 +1051,18 @@ begin
 end;
 
 function THttpSysRawRequest.GetPathInfo: string;
+var
+  LQueryPos: Integer;
 begin
-  if FRequest.CookedUrl.pAbsPath <> nil then
-    SetString(Result, FRequest.CookedUrl.pAbsPath, FRequest.CookedUrl.AbsPathLength div SizeOf(WideChar))
-  else
+  { Keep the escaped path until Horse splits it into route segments. The
+    HTTP.sys cooked URL decodes %2F to '/', which would turn an encoded slash
+    inside a parameter into a path separator and produce a false 404. IOCP and
+    Epoll expose the raw path for the same reason. }
+  Result := GetURL;
+  LQueryPos := Pos('?', Result);
+  if LQueryPos > 0 then
+    SetLength(Result, LQueryPos - 1);
+  if Result = '' then
     Result := '/';
 end;
 
@@ -1510,6 +1521,11 @@ begin
         Inc(LHdrIdx);
       end;
     {$ELSE}
+    // FIX-HTTPSYS-CORS-NIL: the shadow CustomHeaders dict is nil when headers arrived only via
+    // RawWebResponse (e.g. Horse.CORS calls Res.RawWebResponse.SetCustomHeader, never AddHeader),
+    // yet the block is entered because LRawHeaderCount/LRepeatCount > 0 — so guard the for..in.
+    // (The FPC branch above is already guarded by LHeaderCount, which is 0 when the dict is nil.)
+    if LHeadersList <> nil then
     for LPair in LHeadersList do
       if not SameText(LPair.Key, 'Set-Cookie') then
       begin
@@ -1836,6 +1852,12 @@ begin
       begin
         LHttpOverlapped := PHttpSysOverlapped(LOverlapped);
         
+        { The request queue may have been cancelled while this thread was
+          blocked in GetQueuedCompletionStatus.  Its OVERLAPPED remains owned
+          by FPendingReceives and is released after every listener has stopped. }
+        if Terminated or not FRunning or not THorseProviderHttpSys.FRunning then
+          Break;
+
         // Dispatch processing concurrently
         DispatchRequest(LHttpOverlapped.Buffer);
 
@@ -1854,6 +1876,9 @@ begin
       if Assigned(LOverlapped) then
       begin
         LHttpOverlapped := PHttpSysOverlapped(LOverlapped);
+        if Terminated or not FRunning or not THorseProviderHttpSys.FRunning then
+          Break;
+
         if LStatus = ERROR_MORE_DATA then
         begin
           SetLength(LHttpOverlapped.Buffer, LBytesReturned);
@@ -1881,6 +1906,7 @@ begin
   FUrlGroupId := 0;
   FReqQueue := 0;
   FListenerThreads := nil;
+  FPendingReceives := nil;
   FBufferPool := THttpSysBufferPool.Create;
 
   {$IF DEFINED(FPC)}
@@ -1904,8 +1930,9 @@ class destructor THorseProviderHttpSys.DestroyClass;
 begin
   FKnownRequestHeadersMap.Free;
   FKnownResponseHeadersMap.Free;
-  FBufferPool.Free;
   FListenerThreads.Free;
+  ReleasePendingReceives;
+  FBufferPool.Free;
 end;
 
 class procedure THorseProviderHttpSys.SetPort(const AValue: Integer);
@@ -1967,6 +1994,21 @@ begin
       PostNewReceive(AOverlapped);
     end;
   end;
+end;
+
+class procedure THorseProviderHttpSys.ReleasePendingReceives;
+var
+  LHttpOver: PHttpSysOverlapped;
+begin
+  if FPendingReceives = nil then
+    Exit;
+
+  for LHttpOver in FPendingReceives do
+  begin
+    FBufferPool.Release(LHttpOver.Buffer);
+    Dispose(LHttpOver);
+  end;
+  FreeAndNil(FPendingReceives);
 end;
 
 class procedure THorseProviderHttpSys.InternalListen;
@@ -2039,6 +2081,7 @@ begin
         {$ENDIF}
 
         FListenerThreads := TList<THttpSysListenerThread>.Create;
+        FPendingReceives := TList<PHttpSysOverlapped>.Create;
         LThreadCount := TThread.ProcessorCount;
         if LThreadCount < 1 then
           LThreadCount := 1;
@@ -2050,6 +2093,7 @@ begin
           LHttpOver.ReqQueue := FReqQueue;
           LHttpOver.RequestId := 0;
           LHttpOver.Buffer := THorseProviderHttpSys.BufferPool.Acquire(65536);
+          FPendingReceives.Add(LHttpOver);
           PostNewReceive(LHttpOver);
         end;
 
@@ -2107,6 +2151,8 @@ end;
 class procedure THorseProviderHttpSys.InternalStopListen;
 var
   LListener: THttpSysListenerThread;
+  LHttpOver: PHttpSysOverlapped;
+  LBytesTransferred: DWORD;
 begin
   TriggerBeforeStop;
   if not FRunning then Exit;
@@ -2123,19 +2169,10 @@ begin
     end;
   end;
 
-  // Close the Completion Port handle to unblock listener threads immediately
-  if FCompletionPort <> 0 then
-  begin
-    CloseHandle(FCompletionPort);
-    FCompletionPort := 0;
-  end;
-
-  // Closing the request queue cancels any pending HttpReceiveHttpRequest API calls, forcing thread to exit
+  { Cancel every posted receive before releasing its OVERLAPPED storage.  The
+    listener loop no longer reposts completions after FRunning is cleared. }
   if FReqQueue <> 0 then
-  begin
-    HttpCloseRequestQueue(FReqQueue);
-    FReqQueue := 0;
-  end;
+    HttpSysCancelIoEx(FReqQueue, nil);
 
   if FListenerThreads <> nil then
   begin
@@ -2146,6 +2183,27 @@ begin
     end;
     FreeAndNil(FListenerThreads);
   end;
+
+  { Waiting for the listener threads above ensures that none of them can still
+    read an OVERLAPPED.  GetOverlappedResult then waits for each cancelled
+    kernel operation before its record and managed buffer are finalized. }
+  if (FReqQueue <> 0) and (FPendingReceives <> nil) then
+    for LHttpOver in FPendingReceives do
+      GetOverlappedResult(FReqQueue, LHttpOver^.Overlapped, LBytesTransferred, True);
+
+  if FCompletionPort <> 0 then
+  begin
+    CloseHandle(FCompletionPort);
+    FCompletionPort := 0;
+  end;
+
+  if FReqQueue <> 0 then
+  begin
+    HttpCloseRequestQueue(FReqQueue);
+    FReqQueue := 0;
+  end;
+
+  ReleasePendingReceives;
 
   {$IF DEFINED(FPC)}
   if Assigned(THttpSysThreadPool.FInstance) then
@@ -2202,6 +2260,7 @@ end;
 
 class procedure THorseProviderHttpSys.ListenWithConfig(const APort: Integer; const AConfig: THorseCrossSocketConfig);
 begin
+  ValidateNoUnsupportedTls(AConfig, 'HttpSys');
   SetPort(APort);
   InternalListen;
 end;
@@ -2218,7 +2277,7 @@ begin
   THorseCore.SetIsShuttingDown(True);
   try
     LStartedAt := GetTickCount64;
-    while (THorseCore.GetActiveRequests > 0) and
+    while (GetDrainActiveRequests > 0) and
           (GetTickCount64 - LStartedAt < UInt64(ATimeoutMS)) do
       Sleep(10);
     InternalStopListen;

@@ -2,6 +2,9 @@
 
 *Leia em [English](./providers.md) ou [Português (BR)](./providers.pt-BR.md).*
 
+Para os padrões HTTPS do Indy embutido, negociação e migração de TLS 1.0,
+veja [Política de protocolos TLS no Indy](indy-tls-policy.pt-BR.md).
+
 O Horse separa duas escolhas arquiteturais que costumam ser confundidas:
 
 1. **Provider** — o transporte HTTP que é dono do socket e parseia as requisições. Indy é o padrão; CrossSocket e mORMot2 são alternativas assíncronas opcionais; provedores futuros (nghttp2, …) seguirão o mesmo padrão.
@@ -38,10 +41,10 @@ O **Provider padrão depende do compilador**:
 | **`fphttpserver`** _(padrão FPC para self-hosted)_ | _(nenhum)_ | &nbsp;&nbsp;&nbsp;n/a | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[horse-provider-crosssocket](https://github.com/freitasjca/horse-provider-crosssocket)** | `HORSE_CROSSSOCKET` | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
 | 🆕 **[horse-provider-mormot](https://github.com/freitasjca/horse-provider-mormot)** | `HORSE_PROVIDER_MORMOT` | &nbsp;&nbsp;&nbsp;✔️ | &nbsp;&nbsp;&nbsp;&nbsp;✔️ |
-| **horse-provider-ics** | `HORSE_PROVIDER_ICS` | Opcional, pacote externo (Delphi: Windows + Linux64/macOS) | ✔ | ❌ |
+| **horse-provider-ics** | `HORSE_PROVIDER_ICS` | Opcional, pacote externo (Delphi: Windows (ICS V9.x)) | ✔ | ❌ |
 | **[HTTP.sys](./httpsys.pt-BR.md)** | `HORSE_PROVIDER_HTTPSYS` | Opcional, embutido (modo kernel Windows) | ✔ | ✔ |
 | **[epoll](./epoll.pt-BR.md)** | `HORSE_PROVIDER_EPOLL` | Opcional, embutido (event loop assíncrono Linux) | ✔ | ✔ |
-| **horse-provider-ics** | `HORSE_PROVIDER_ICS` | Opcional, pacote externo (Delphi: Windows + Linux64/macOS) | ✔ | ❌ |
+| **horse-provider-ics** | `HORSE_PROVIDER_ICS` | Opcional, pacote externo (Delphi: Windows (ICS V9.x)) | ✔ | ❌ |
 | **[IOCP](./iocp.pt-BR.md)** | `HORSE_PROVIDER_IOCP` | Opcional, embutido (portas de conclusão Windows) | ✔ | ✔ |
 | 🆕 **[gRPC](./grpc.pt-BR.md)** | `HORSE_GRPC` / Registro manual | Opcional, embutido (gRPC e HTTP/2 h2c nativo) | ✔ | ✔ |
 
@@ -53,10 +56,10 @@ O **Provider padrão depende do compilador**:
 > | Daemon / HTTPApplication / LCL | FPC | **`fphttpserver`** | ✘ |
 > | Qualquer self-hosted + `HORSE_CROSSSOCKET` | Qualquer um | **`Delphi-Cross-Socket`** | ✘ |
 > | Qualquer self-hosted + `HORSE_PROVIDER_MORMOT` | Qualquer um | **`mORMot2`** (`THttpServer` / `THttpApiServer`) | ✘ |
-> | Self-hosted + `HORSE_PROVIDER_ICS` | Delphi (Windows / Linux64 / macOS) | **`OverbyteICS`** (`THttpServer` / `TSslHttpServer`) | ✘ |
+> | Self-hosted + `HORSE_PROVIDER_ICS` | Delphi (Windows / ICS V9.x) | **`OverbyteICS`** (`THttpServer` / `TSslHttpServer`) | ✘ |
 > | Qualquer self-hosted + `HORSE_PROVIDER_HTTPSYS` | Qualquer um | **`HTTP.sys`** (Driver de Kernel do Windows) | ✘ |
 > | Qualquer self-hosted + `HORSE_PROVIDER_EPOLL` | Qualquer um | **`epoll`** (API epoll nativa do Linux) | ✘ |
-> | Qualquer Self-hosted + `HORSE_PROVIDER_ICS` | Delphi (Windows / Linux64 / macOS) | **`OverbyteICS`** (`THttpServer` / `TSslHttpServer`) | ✘ |
+> | Qualquer Self-hosted + `HORSE_PROVIDER_ICS` | Delphi (Windows / ICS V9.x) | **`OverbyteICS`** (`THttpServer` / `TSslHttpServer`) | ✘ |
 > | Qualquer self-hosted + `HORSE_PROVIDER_IOCP` | Windows (Delphi / FPC) | **Windows IOCP** (Winsock2 Completion Ports) | ✘ |
 > | Módulo Apache | Qualquer um | **Apache httpd** (via `Web.HTTPApp.TApacheRequest` / `mod_horse`) | ✘ |
 > | ISAPI | Delphi | **IIS** (via `Web.HTTPApp.TISAPIRequest`) | ✘ |
@@ -118,6 +121,21 @@ Nos Conditional Defines do projeto: `HORSE_CROSSSOCKET`. Seu código fica o mesm
 CrossSocket e Indy são **alternativas drop-in** para o mesmo código Horse. O mesmo middleware (`Horse.CORS`, `Jhonson`, `JWT`, `logger`, etc.) funciona nos dois.
 
 Para configuração (certificados TLS, limites de tamanho de body, número de threads IO, mTLS), veja a [documentação do próprio provider](https://github.com/freitasjca/horse-provider-crosssocket#readme). Um teste de integração TLS unidirecional + mútuo acompanha o `tests/` do provider (`HorseCSTLSTestServer` / `…Client`, veja `tests/TLS-TESTS.md`).
+
+Os campos de cifra TLS de `THorseCrossSocketConfig` (`Horse.Provider.Config`) são separados por geração de protocolo, porque o OpenSSL os configura por chamadas distintas. `SSLCipherList` vale **apenas para TLS 1.2 e anteriores**. `SSLCipherSuitesTLS13` define as suítes do TLS 1.3 (nomes exatos, com diferença entre maiúsculas e minúsculas), e `SSLMinVersion` (`htvDefault` / `htvTLS12` / `htvTLS13`) define a versão mínima do protocolo. Vazio / `htvDefault` não configura nada.
+
+**Quais providers aplicam estes campos.** São campos de um record. Se um valor tem efeito depende do provider que recebe o record, e um provider mais antigo compila contra ele e ignora os campos novos em silêncio:
+
+| Provider | `SSLCipherSuitesTLS13` | `SSLMinVersion` |
+|---|---|---|
+| [horse-provider-crosssocket](https://github.com/freitasjca/horse-provider-crosssocket) **≥ 1.0.27** | Aplicado. Um nome de suíte desconhecido impede o início, informando o nome | `htvTLS12`: o mínimo do Delphi-Cross-Socket já é TLS 1.2. `htvTLS13`: **recusa iniciar** — a biblioteca ainda não permite elevar o mínimo |
+| [horse-provider-nghttp2](https://github.com/freitasjca/horse-provider-nghttp2) **≥ 1.11.0** | Aplicado e relido; uma suíte descartada pelo OpenSSL impede o início | Aplicado e relido; uma divergência impede o início |
+| Versões anteriores desses dois providers | **Ignorado em silêncio** | **Ignorado em silêncio** |
+| Providers embutidos do Horse (Indy, HttpSys, IOCP, Epoll, Daemon, FPC) | Valores não vazios impedem o início | Valores diferentes do padrão impedem o início |
+
+O `ListenWithConfig` dos providers embutidos usa a porta e rejeita configurações TLS explícitas antes de alterar a porta ou abrir um listener. Isso inclui `SSLEnabled=True`, certificado/chave/senha/CA ou listas de cifras não vazios, `SSLVerifyPeer=True` e `SSLMinVersion` diferente do padrão. A exceção identifica o provider e o campo não suportado. Os valores padrão de TLS continuam aceitos; os demais campos deste record continuam ignorados. **Mudança de compatibilidade:** releases anteriores do Horse ignoravam essas configurações TLS silenciosamente. Remova-as do record compartilhado e configure TLS pela API suportada pelo provider; não simplesmente desative um requisito de segurança. Indy (Console, Daemon, VCL) atende TLS por `THorse.IOHandleSSL` (com seus próprios `SSLVersions` e `CipherList`), não por este record. HttpSys, IOCP, Epoll e os providers FPC atendem apenas HTTP sem TLS. Os providers mORMot2 e ICS têm records de configuração próprios; veja a documentação deles.
+
+Se você depende de `htvTLS13`, fixe a versão do provider nas dependências do Boss e verifique por fora: `openssl s_client -connect <host>:<port> -tls1_2` deve falhar. Este repositório testa os valores padrão do record e a rejeição de configurações TLS não suportadas pelos providers internos; não valida a negociação TLS de providers externos. A aplicação é testada nos repositórios dos providers contra um peer `openssl s_client`: CrossSocket `scripts/run-tls-tests.bat` passo 3, nghttp2 `samples/tests/build-fpc.sh` estágio 10c.
 
 ### Instalação 
 
@@ -217,11 +235,11 @@ begin
 end;
 ```
 
-**Escopo:** **somente Delphi — Windows e POSIX (Linux64 / macOS).** A camada POSIX do ICS (`Ics.Posix.WinTypes` + `Ics.Posix.PXMessages`) fornece o mesmo loop de mensagens `TIcsWndControl` no Linux/macOS, então o marshal-back do worker-pool e o TLS OpenSSL funcionam sem alteração de código; o OpenSSL acompanha como `.so` no Linux. Para um serviço Linux use `HORSE_APPTYPE_DAEMON` + `THorseICSLinuxDaemonApp.Run` (handlers SIGTERM/SIGINT + `Listen` bloqueante). Um port para **Lazarus/FPC não é viável** — a camada POSIX do ICS usa a RTL POSIX do *Delphi* e o ICS desativa o OpenSSL no FPC. Selecionar `HORSE_PROVIDER_ICS` no FPC gera um `FATAL` em tempo de compilação.
+**Escopo:** **somente Delphi no Windows (Win32/Win64), com ICS V9.x.** ICS V9.x não suporta Linux/macOS; os antigos arquivos POSIX não constituem suporte funcional. ICS V10 exige uma adaptação do provider e não é suportado atualmente. Lazarus/FPC não é suportado; selecionar `HORSE_PROVIDER_ICS` no FPC gera um `FATAL` em tempo de compilação.
 
 #### Instalação
 
-O ICS **não** é instalável via Boss. **Instale o OverbyteICS seguindo as instruções oficiais do ICS:** baixe ou clone o ICS (v9.x) e adicione a pasta `Source/` ao search path do seu projeto. As DLLs do OpenSSL acompanham a distribuição do ICS. Em seguida, clone o [`horse-provider-ics`](https://github.com/freitasjca/horse-provider-ics) e adicione seu `src/` ao search path. Veja a [documentação do próprio provider](https://github.com/freitasjca/horse-provider-ics#readme) para a configuração completa, a suíte de testes de integração A–K e as limitações conhecidas (uploads precisam enviar `Content-Length`; keep-alive está desativado na v1). Um teste TLS unidirecional + mútuo dedicado acompanha (`HorseICSTLSTestServer` / `…Client`, veja `tests/TLS-TESTS.md`) — o teste mais importante para o ICS, cujo diferencial é justamente a pilha OpenSSL.
+O ICS **não** é instalável via Boss. **Instale o OverbyteICS seguindo as instruções oficiais do ICS:** baixe ou clone o ICS (v9.x) e adicione a pasta `Source/` ao search path do seu projeto. Com os padrões do ICS V9.7 (`OpenSSL_Resource_Files`), as DLLs OpenSSL são incorporadas como recursos e extraídas no primeiro uso em `C:\ProgramData\ICS-OpenSSL\<version>\`; a conta do serviço precisa de permissão de escrita nesse local no primeiro uso. Se o carregamento por recursos for desativado, configure e distribua as DLLs externas conforme a documentação do ICS. Em seguida, clone o [`horse-provider-ics`](https://github.com/freitasjca/horse-provider-ics) e adicione seu `src/` ao search path. Veja a [documentação do próprio provider](https://github.com/freitasjca/horse-provider-ics#readme) para a configuração completa, a suíte de testes de integração A–K e as limitações conhecidas (uploads precisam enviar `Content-Length`; keep-alive está desativado na v1). Um teste TLS unidirecional + mútuo dedicado acompanha (`HorseICSTLSTestServer` / `…Client`, veja `tests/TLS-TESTS.md`) — o teste mais importante para o ICS, cujo diferencial é justamente a pilha OpenSSL.
 
 ### HttpSys (opcional, nativo)
 
@@ -331,7 +349,7 @@ Provider × Tipo de aplicação — quais combinações são atualmente express�
 | **`fphttpserver`** _(padrão FPC)_ | n/a | n/a | n/a | ✔ | ✔ | ✔ | n/a | n/a | n/a | n/a |
 | **CrossSocket** (`HORSE_PROVIDER_CROSSSOCKET`) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ❌ | ❌ | ❌ | ❌ |
 | **mORMot2** (`HORSE_PROVIDER_MORMOT`) | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ❌ | ❌ | ❌ | ❌ |
-| **ICS** (`HORSE_PROVIDER_ICS`) _(Delphi; Windows + Linux64/macOS)_ | ✔ | ✔ | ✔ | n/a | n/a | n/a | ❌ | ❌ | ❌ | ❌ |
+| **ICS** (`HORSE_PROVIDER_ICS`) _(Delphi; Windows (ICS V9.x))_ | ✔ | ✔ | ✔ | n/a | n/a | n/a | ❌ | ❌ | ❌ | ❌ |
 | **HttpSys** (`HORSE_PROVIDER_HTTPSYS`) _(Windows; nativo)_ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ❌ | ❌ | ❌ | ❌ |
 | _Host-managed_ (Apache/ISAPI/CGI/FCGI) | n/a | n/a | n/a | n/a | n/a | n/a | ✔ | ✔ | ✔ | ✔ |
 
@@ -1002,7 +1020,7 @@ accept (limitado pelo `somaxconn`). Deixe nos defaults até um teste de carga in
 - [Suporte de Compilador](./compiler-support.pt-BR.md) — versões Delphi/FPC por Provider e Tipo de aplicação.
 - [`horse-provider-crosssocket`](https://github.com/freitasjca/horse-provider-crosssocket) — documentação própria do Provider CrossSocket assíncrono opcional.
 - [`horse-provider-mormot`](https://github.com/freitasjca/horse-provider-mormot) — documentação própria do Provider mORMot2 assíncrono opcional.
-- [`horse-provider-ics`](https://github.com/freitasjca/horse-provider-ics) — o Provider OverbyteICS opcional (TLS OpenSSL 3.x/4.x), somente Delphi (Windows + POSIX/Linux64/macOS).
+- [`horse-provider-ics`](https://github.com/freitasjca/horse-provider-ics) — o Provider OverbyteICS opcional (TLS OpenSSL 3.x/4.x), somente Delphi (Windows / ICS V9.x).
 - **HttpSys** (`Horse.Provider.HttpSys`, nativo do Horse) — transporte http.sys nativo do Windows em modo kernel; sem dependência externa, somente Windows.
 - [**gRPC**](./grpc.pt-BR.md) — Provedor de transporte gRPC nativo e HTTP/2 h2c (Code-First).
 

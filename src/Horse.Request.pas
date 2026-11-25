@@ -199,6 +199,7 @@ type
     );
     function RemoteAddr: string; virtual;
     function GetPathSegments: TArray<THorseBufferSlice>;
+    function DecodePathParam(const AValue: string): string;
 { ===========================================================================
   PATCH-REQ-5  RawPathInfo
   Returns the undecoded (percent-encoded) request path on the Delphi/Indy
@@ -267,12 +268,90 @@ uses
   that need the raw bytes should use Body<TStream>.
   =========================================================================== }
 function THorseRequest.Body: string;
+{$IF NOT DEFINED(FPC)}
+  {$IF CompilerVersion < 36}
+  function IsJSONContentType(const AContentType: string): Boolean;
+  var
+    LMediaType: string;
+    LSeparator: Integer;
+  begin
+    LSeparator := Pos(';', AContentType);
+    if LSeparator > 0 then
+      LMediaType := Trim(Copy(AContentType, 1, LSeparator - 1))
+    else
+      LMediaType := Trim(AContentType);
+
+    Result := SameText(LMediaType, 'application/json') or
+      ((Length(LMediaType) > 5) and
+       SameText(Copy(LMediaType, Length(LMediaType) - 4, 5), '+json'));
+  end;
+
+  function IsUTF8OrUnspecifiedCharset(const AContentType: string): Boolean;
+  var
+    LParameter: string;
+    LCharset: string;
+    LParameterStart: Integer;
+    LParameterEnd: Integer;
+    LSeparator: Integer;
+  begin
+    Result := True;
+    LParameterStart := Pos(';', AContentType) + 1;
+    if LParameterStart = 1 then
+      Exit;
+
+    while LParameterStart <= Length(AContentType) do
+    begin
+      LParameterEnd := LParameterStart;
+      while (LParameterEnd <= Length(AContentType)) and
+        (AContentType[LParameterEnd] <> ';') do
+        Inc(LParameterEnd);
+
+      LParameter := Trim(Copy(AContentType, LParameterStart,
+        LParameterEnd - LParameterStart));
+      LSeparator := Pos('=', LParameter);
+      if (LSeparator > 0) and
+        SameText(Trim(Copy(LParameter, 1, LSeparator - 1)), 'charset') then
+      begin
+        LCharset := Trim(Copy(LParameter, LSeparator + 1, MaxInt));
+        if (Length(LCharset) >= 2) and
+          (((LCharset[1] = '"') and (LCharset[Length(LCharset)] = '"')) or
+           ((LCharset[1] = '''') and (LCharset[Length(LCharset)] = ''''))) then
+          LCharset := Copy(LCharset, 2, Length(LCharset) - 2);
+        Exit(SameText(LCharset, 'utf-8') or SameText(LCharset, 'utf8'));
+      end;
+
+      LParameterStart := LParameterEnd + 1;
+    end;
+  end;
+  {$IFEND}
+{$ENDIF}
+{$IF NOT DEFINED(FPC)}
+  {$IF CompilerVersion < 36}
+var
+  LContentType: string;
+  {$IFEND}
+{$ENDIF}
 begin
   if not Assigned(FWebRequest) then
   begin
     Result := FBodyString;
     Exit;
   end;
+
+  {$IF NOT DEFINED(FPC)}
+    {$IF CompilerVersion < 36}
+    LContentType := string(FWebRequest.GetFieldByName('Content-Type'));
+    { Delphi 11 and older decode an unspecified charset as ANSI. Indy keeps
+      the original request bytes in RawContent, so JSON can be decoded using
+      its UTF-8 default without changing other WebBroker providers or media
+      types. Delphi 12 and newer already handle this in Web.HTTPApp. }
+    if FWebRequest.ClassNameIs('TIdHTTPAppRequest') and
+      IsJSONContentType(LContentType) and
+      IsUTF8OrUnspecifiedCharset(LContentType) then
+      Exit(UTF8ToString(RawByteString(FWebRequest.RawContent)));
+    {$IFEND}
+  {$ENDIF}
+
   Result := FWebRequest.Content;
 end;
 
@@ -530,7 +609,13 @@ var
   LName: String;
   LValue: String;
 begin
-  FContentFields := THorseCoreParam.Create(THorseList.Create).Required(False);
+  // [FIX-DECODE-ONCE-1] ADecodeValues=False. Every path that fills this
+  // collection stores values ALREADY URL-decoded: WebBroker ContentFields and
+  // the raw adapters (including IOCP) decode form values before storing them.
+  // Decoding again on read raised EConvertError on any value holding a
+  // literal percent sign, turned + into a space, and - because GetItem writes
+  // the result back - re-decoded on every repeated read. Params uses the same.
+  FContentFields := THorseCoreParam.Create(THorseList.Create, False).Required(False);
 { PATCH-REQ-4 � nil-guard: on CrossSocket path FWebRequest is nil.
   Multipart / form-url-encoded body parsing is the responsibility of
   application-level middleware on the CrossSocket path (e.g. a middleware
@@ -624,7 +709,7 @@ end;
 
 procedure THorseRequest.InitializeParams;
 begin
-  FParams := THorseCoreParam.Create(THorseList.Create).Required(True);
+  FParams := THorseCoreParam.Create(THorseList.Create, False).Required(True);
 end;
 
 { ===========================================================================
@@ -642,7 +727,11 @@ var
   LStart, LLen, I, LEqPos: Integer;
   LKey, LValue: string;
 begin
-  FQuery := THorseCoreParam.Create(THorseList.Create).Required(False);
+  // [FIX-DECODE-ONCE-1] ADecodeValues=False. Values are stored decoded: the loop
+  // below runs DecodeParam on every key and value, and the CrossSocket bridge
+  // stores Delphi-Cross-Socket's decoded query. Decoding again on each read was
+  // a second - and, via GetItem's write-back, a repeated - decode.
+  FQuery := THorseCoreParam.Create(THorseList.Create, False).Required(False);
   if not Assigned(FWebRequest) then
     Exit;  // CrossSocket path: bridge populates query dict directly
   
@@ -668,9 +757,9 @@ begin
       LKey := Copy(LQuery, LStart, LEqPos - LStart);
       LValue := Copy(LQuery, LEqPos + 1, I - LEqPos - 1);
       
-      LKey := DecodeParam(LKey);
-      LValue := DecodeParam(LValue);
-        
+      LKey := DecodeQueryParam(LKey);
+      LValue := DecodeQueryParam(LValue);
+
       if not FQuery.Dictionary.ContainsKey(LKey) then
         FQuery.Dictionary.AddOrSetValue(LKey, LValue)
       else
@@ -679,7 +768,7 @@ begin
     else
     begin
       LKey := Copy(LQuery, LStart, I - LStart);
-      LKey := DecodeParam(LKey);
+      LKey := DecodeQueryParam(LKey);
       if not FQuery.Dictionary.ContainsKey(LKey) then
         FQuery.Dictionary.AddOrSetValue(LKey, '');
     end;
@@ -694,15 +783,7 @@ var
 begin
   LContentType := FWebRequest.ContentType;
   LFormUrlEncoded := TMimeTypes.ApplicationXWWWFormURLEncoded.ToString;
-{$IF DEFINED(FPC)}
-  Result := StrLIComp(PChar(LContentType), PChar(LFormUrlEncoded), Length(LFormUrlEncoded)) = 0;
-{$ELSE}
-{$IF CompilerVersion <= 30}
-  Result := LContentType = PChar(LFormUrlEncoded);
-{$ELSE}
-  Result := StrLIComp(PChar(LContentType), PChar(LFormUrlEncoded), Length(LFormUrlEncoded)) = 0;
-{$IFEND}
-{$ENDIF}
+  Result := SameText(Copy(LContentType, 1, Length(LFormUrlEncoded)), LFormUrlEncoded);
 end;
 
 function THorseRequest.IsMultipartForm: Boolean;
@@ -855,19 +936,52 @@ end;
 function THorseRequest.GetPathSegments: TArray<THorseBufferSlice>;
 var
   LPath: string;
-  LPathLen: Integer;
   LByteCount: Integer;
   LBytes: TBytes;
   LTempBytes: TBytes;
   LSlice: THorseBufferSlice;
   LStartOffset: Integer;
-  I, LLen: Integer;
-  LStart, LCount: Integer;
+  I, LInputEnd, LLen: Integer;
+  LStart, LWrite, LCount: Integer;
+  LDecodedByte: Byte;
+  LDecodePercent: Boolean;
+
+  function HexValue(const AByte: Byte): Integer;
+  begin
+    case AByte of
+      Ord('0')..Ord('9'):
+        Result := AByte - Ord('0');
+      Ord('A')..Ord('F'):
+        Result := AByte - Ord('A') + 10;
+      Ord('a')..Ord('f'):
+        Result := AByte - Ord('a') + 10;
+    else
+      Result := -1;
+    end;
+  end;
+
+  function TryDecodePercent(const AIndex: Integer; out AByte: Byte): Boolean;
+  var
+    LHigh, LLow: Integer;
+  begin
+    Result := False;
+    if AIndex + 2 >= LInputEnd then
+      Exit;
+    LHigh := HexValue(LBytes[AIndex + 1]);
+    LLow := HexValue(LBytes[AIndex + 2]);
+    if (LHigh < 0) or (LLow < 0) then
+      Exit;
+    AByte := Byte((LHigh shl 4) or LLow);
+    Result := True;
+  end;
 begin
   LPath := RawPathInfo;
-  LPathLen := Length(LPath);
-  if LPathLen = 0 then
+  if Length(LPath) = 0 then
     Exit(nil);
+
+  // WebBroker and FPC's TRequest expose the original percent-encoded path.
+  // Populate() supplies the provider's path directly and keeps legacy decoding.
+  LDecodePercent := Assigned(FWebRequest);
 
   if FArena = nil then
   begin
@@ -875,7 +989,7 @@ begin
     FOwnsArena := True;
   end;
 
-{$IF DEFINED(FPC)}
+{$IF SizeOf(Char) = 1}
   LByteCount := Length(LPath);
   LSlice := FArena.Allocate(LByteCount);
   LBytes := LSlice.Buffer;
@@ -893,27 +1007,44 @@ begin
 {$ENDIF}
 
   SetLength(Result, 0);
+  LInputEnd := LStartOffset + LByteCount;
   LStart := LStartOffset;
+  LWrite := LStartOffset;
   LCount := 0;
 
   I := LStartOffset;
-  while I < LStartOffset + LByteCount do
+  while I < LInputEnd do
   begin
     if LBytes[I] = 47 then // '/'
     begin
-      LLen := I - LStart;
-      if (LLen > 0) or (LStart = LStartOffset) then
+      LLen := LWrite - LStart;
+      if (LLen > 0) or (LCount = 0) then
       begin
         Inc(LCount);
         SetLength(Result, LCount);
         Result[LCount - 1] := THorseBufferSlice.Create(LBytes, LStart, LLen);
       end;
-      LStart := I + 1;
+      Inc(I);
+      LStart := LWrite;
+      Continue;
     end;
+
+    if LDecodePercent and (LBytes[I] = Ord('%')) and
+      TryDecodePercent(I, LDecodedByte) then
+    begin
+      LBytes[LWrite] := LDecodedByte;
+      Inc(LWrite);
+      Inc(I, 3);
+      Continue;
+    end;
+
+    if LWrite <> I then
+      LBytes[LWrite] := LBytes[I];
+    Inc(LWrite);
     Inc(I);
   end;
 
-  LLen := (LStartOffset + LByteCount) - LStart;
+  LLen := LWrite - LStart;
   if LLen > 0 then
   begin
     Inc(LCount);
@@ -922,6 +1053,15 @@ begin
   end;
 end;
 { =========================================================================== }
+
+function THorseRequest.DecodePathParam(const AValue: string): string;
+begin
+  // GetPathSegments decodes WebBroker/FPC paths; CrossSocket supplies a decoded path.
+  if Assigned(FWebRequest) or Assigned(FCSRawWebRequest) then
+    Result := AValue
+  else
+    Result := DecodeParam(AValue);
+end;
 
 { ===========================================================================
   PATCH-REQ-4 � PopulateCookiesFromHeader implementation

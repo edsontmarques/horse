@@ -4,6 +4,8 @@ unit Horse.Instance;
   {$MODE DELPHI}{$H+}
 {$ENDIF}
 
+{$I Horse.FunctionReferences.inc}
+
 interface
 
 uses
@@ -351,7 +353,7 @@ begin
   if (FCallbacks <> nil) and (FIndex < FCallbacks.Count) then
   begin
     {$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
-    THorseCallbackProc(FCallbacks.Items[FIndex])(FRequest, FResponse, Next);
+    THorseCallbackProc(FCallbacks[FIndex])(FRequest, FResponse, Next);
     {$ELSEIF DEFINED(FPC)}
     FCallbacks.Items[FIndex](FRequest, FResponse, Next);
     {$ELSE}
@@ -1411,7 +1413,7 @@ begin
 end;
 
 // Callback converters
-{$IF DEFINED(FPC)}
+{$IF DEFINED(FPC) AND NOT DEFINED(HORSE_FPC_FUNCTIONREFERENCES)}
 function THorseInstance.GetCallback(const ACallbackRequest: THorseCallbackRequestResponse): THorseCallback;
 begin
   Result := THorseCallback(ACallbackRequest);
@@ -1440,6 +1442,7 @@ begin
     end;
 end;
 
+{$IFNDEF FPC}
 function THorseInstance.GetCallback(const ACallbackResponse: THorseCallbackResponse): THorseCallback;
 begin
   Result := procedure(AReq: THorseRequest; ARes: THorseResponse; ANext: TNextProc)
@@ -1448,6 +1451,8 @@ begin
       ANext();
     end;
 end;
+{$ENDIF}
+
 {$ENDIF}
 
 // Controle de Escuta física delegando para a fachada THorse
@@ -1495,7 +1500,31 @@ procedure THorseInstance.StopListenGraceful(const ATimeoutMS: Integer);
 begin
   SetIsShuttingDown(True);
   try
-    StopListen;
+    // [FIX-GRACEFUL-INSTANCE-1] Delegate to the provider's StopListenGraceful,
+    // not to the hard StopListen.
+    //
+    // This used to call StopListen, which reaches THorseProvider.StopListen and
+    // never THorseProvider.StopListenGraceful — so ATimeoutMS was accepted and
+    // discarded, and every provider override of StopListenGraceful was bypassed
+    // on the Multi-Instance path. All seven that ship with Horse implement a
+    // real bounded drain (Console, IOCP, HttpSys, VCL, Daemon, FPC.Daemon,
+    // FPC.LCL): they stop accepting, then poll the active-request count until
+    // zero or ATimeoutMS expires. None of that ran here. That count includes this
+    // instance's own requests only since FIX-GRACEFUL-INSTANCE-2
+    // (GetDrainActiveRequests); before it the drains read THorseCore's counter
+    // alone, which an instance-routed request never touches.
+    //
+    // The effect was silent: the server stopped, the call returned promptly, and
+    // in-flight requests were cut off — indistinguishable from a successful
+    // drain unless you measure. AGENTS.md directs users to this exact method for
+    // coordinated shutdown behind Kubernetes and load-balancer probes, which is
+    // precisely where cutting off in-flight work costs a dropped response.
+    //
+    // UnregisterHorseInstance and FRunning are kept from the old StopListen path
+    // so instance bookkeeping is unchanged; only the stop call is corrected.
+    THorseProvider.StopListenGraceful(ATimeoutMS);
+    UnregisterHorseInstance(FPort);
+    FRunning := False;
   finally
     SetIsShuttingDown(False);
   end;

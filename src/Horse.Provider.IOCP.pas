@@ -34,6 +34,7 @@ uses
   Horse.Exception.Interrupted,
   Horse.Core,
   Horse.Core.WebSocket,
+  Horse.Utils,
   Horse.Provider.Socket.WebSocket;
 
 type
@@ -833,7 +834,9 @@ var
   I, LStart, LLen, LEqPos: Integer;
   LName, LValue: string;
 begin
-  if not SameText(GetContentType, 'application/x-www-form-urlencoded') then
+  if not SameText(Copy(GetContentType, 1,
+    Length('application/x-www-form-urlencoded')),
+    'application/x-www-form-urlencoded') then
     Exit;
 
   LBody := GetContent;
@@ -842,19 +845,23 @@ begin
 
   LStart := 1;
   LLen := Length(LBody);
-  for I := 1 to LLen do
+  while LStart <= LLen do
   begin
-    if (LBody[I] = '&') or (I = LLen) then
+    I := LStart;
+    LEqPos := 0;
+    while (I <= LLen) and (LBody[I] <> '&') do
     begin
-      LEqPos := Pos('=', LBody, LStart);
-      if (LEqPos > 0) and (LEqPos < I) then
-      begin
-        LName := Copy(LBody, LStart, LEqPos - LStart);
-        LValue := Copy(LBody, LEqPos + 1, I - LEqPos - 1);
-        ADest.Add(LName + '=' + LValue);
-      end;
-      LStart := I + 1;
+      if (LBody[I] = '=') and (LEqPos = 0) then
+        LEqPos := I;
+      Inc(I);
     end;
+    if LEqPos > 0 then
+    begin
+      LName := DecodeParam(Copy(LBody, LStart, LEqPos - LStart));
+      LValue := DecodeParam(Copy(LBody, LEqPos + 1, I - LEqPos - 1));
+      ADest.Add(LName + '=' + LValue);
+    end;
+    LStart := I + 1;
   end;
 end;
 
@@ -2008,6 +2015,7 @@ end;
 
 class procedure THorseProviderIOCP.ListenWithConfig(const APort: Integer; const AConfig: THorseCrossSocketConfig);
 begin
+  ValidateNoUnsupportedTls(AConfig, 'IOCP');
   FPort := APort;
   THorseProviderIOCP.Listen(Horse.Proc.TProc(nil), Horse.Proc.TProc(nil));
 end;
@@ -2024,7 +2032,7 @@ begin
   THorseCore.SetIsShuttingDown(True);
   try
     LStartedAt := GetTickCount64;
-    while (THorseCore.GetActiveRequests > 0) and
+    while (GetDrainActiveRequests > 0) and
           (GetTickCount64 - LStartedAt < UInt64(ATimeoutMS)) do
       Sleep(10);
     InternalStopListen;

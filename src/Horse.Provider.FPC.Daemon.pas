@@ -246,7 +246,7 @@ begin
       LStart := TThread.GetTickCount;
       while (TThread.GetTickCount - LStart < ATimeoutMS) do
       begin
-        if THorseCore.GetActiveRequests = 0 then
+        if GetDrainActiveRequests = 0 then
           Break;
         TThread.Sleep(50);
       end;
@@ -370,6 +370,7 @@ end;
 class procedure THorseProvider.ListenWithConfig(const APort: Integer;
   const AConfig: THorseCrossSocketConfig);
 begin
+  ValidateNoUnsupportedTls(AConfig, 'FPC.Daemon');
   SetPort(APort);
   InternalListen;
 end;
